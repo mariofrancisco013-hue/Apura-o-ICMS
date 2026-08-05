@@ -195,6 +195,8 @@ begin
         'apuracao_linhas','checkpoints_referencia','inconsistencias'
     ])
     loop
+        -- Postgres não aceita "create policy if not exists" (só existe para tabelas/índices/etc) —
+        -- por isso o drop antes do create.
         execute format('drop policy if exists "authenticated_full_access" on %I', t);
         execute format(
             'create policy "authenticated_full_access" on %I '

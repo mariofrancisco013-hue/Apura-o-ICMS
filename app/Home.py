@@ -28,7 +28,8 @@ else:
 
 st.markdown("---")
 st.markdown(
-    "Use o menu à esquerda: **Importar Relatórios** (Entrada/Saída), **Empresas** (cadastro do grupo), "
-    "**CFOP** (tabela de referência e exceções), **Apuração** (calcular e conferir contra as Rotinas "
-    "1024/1025) e **Inconsistências** (revisão das validações cruzadas de NCM e transferência)."
+    "Use o menu à esquerda: **Importar Relatórios** (Entrada/Saída), **ICMS Normal** (planilhas de "
+    "Entrada/Saída editáveis, ajustes da apuração, e a apuração final espelhando a Rotina 1025), "
+    "**Empresas** (cadastro do grupo), **CFOP** (tabela de referência e exceções) e **Inconsistências** "
+    "(revisão das validações cruzadas de NCM e transferência)."
 )

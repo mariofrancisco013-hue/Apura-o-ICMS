@@ -4,6 +4,12 @@ Lógica de importação dos relatórios de Entrada/Saída — compartilhada entr
 
 Mapeamento de colunas confirmado em 05/08/2026 (ver claude/metodologia-icms-normal.md no projeto) — os
 exports vêm com cabeçalhos genéricos "Coluna1", "Coluna2"... por isso o mapeamento é posicional.
+
+IMPORTANTE (achado de 05/08/2026): o relatório de Saída chega a ~45 mil linhas. A primeira versão deste
+módulo inserida linha a linha (um INSERT por linha = ~45 mil idas e voltas ao banco) e travava por muito
+tempo em produção. A versão atual monta um DataFrame já no formato da tabela e usa `DataFrame.to_sql(...,
+method="multi", chunksize=500)`, que agrupa até 500 linhas por INSERT — poucas dezenas de idas e voltas em
+vez de dezenas de milhares.
 """
 import json
 
@@ -19,6 +25,14 @@ COLS_SAIDA = [
     "parceiro", "nf_numero", "tipo_genero_item", "data_emissao", "produto", "ncm", "cfop", "valor_produto",
     "_col9", "_col10", "_col11", "_col12", "_col13", "_col14", "aliq_icms", "base_icms", "valor_icms",
     "_col18", "_col19", "valor_total", "uf", "prazo_dias",
+]
+
+# Colunas finais da tabela notas_fiscais_itens que este módulo preenche (na ordem do INSERT via to_sql)
+COLS_TABELA = [
+    "competencia_id", "tipo_operacao", "parceiro", "nf_numero", "tipo_genero_item",
+    "data_emissao", "data_entrada", "produto", "ncm", "cfop", "valor_produto",
+    "aliq_fcp", "valor_fcp", "aliq_icms", "base_icms", "valor_icms", "valor_total",
+    "uf", "prazo_dias", "colunas_nao_identificadas",
 ]
 
 
@@ -62,8 +76,9 @@ def checar_duplicacao(session, competencia_id, substituir):
     return n or 0
 
 
-def importar_arquivo(session, arquivo, tipo_operacao, competencia_id):
-    """`arquivo` pode ser um caminho (str/Path) ou um buffer tipo st.file_uploader."""
+def _preparar_dataframe(arquivo, tipo_operacao, competencia_id):
+    """Lê o .xls e devolve um DataFrame já no formato exato da tabela notas_fiscais_itens, pronto para
+    to_sql — nenhum loop linha a linha."""
     cols = COLS_ENTRADA if tipo_operacao == "entrada" else COLS_SAIDA
     df = pd.read_excel(arquivo, sheet_name="Report", header=0, engine="xlrd")
     if len(df.columns) != len(cols):
@@ -73,42 +88,51 @@ def importar_arquivo(session, arquivo, tipo_operacao, competencia_id):
         )
     df.columns = cols
 
-    inseridos = 0
-    for _, row in df.iterrows():
-        extras = {c.lstrip("_"): (None if pd.isna(row[c]) else float(row[c]))
-                  for c in cols if c.startswith("_")}
-        session.execute(text("""
-            insert into notas_fiscais_itens (
-                competencia_id, tipo_operacao, parceiro, nf_numero, tipo_genero_item,
-                data_emissao, data_entrada, produto, ncm, cfop, valor_produto,
-                aliq_fcp, valor_fcp, aliq_icms, base_icms, valor_icms, valor_total,
-                uf, prazo_dias, colunas_nao_identificadas
-            ) values (
-                :cid, :tipo, :parceiro, :nf, :tipo_genero,
-                :dt_emissao, :dt_entrada, :produto, :ncm, :cfop, :valor_produto,
-                :aliq_fcp, :valor_fcp, :aliq_icms, :base_icms, :valor_icms, :valor_total,
-                :uf, :prazo, :extras
-            )
-        """), {
-            "cid": competencia_id, "tipo": tipo_operacao,
-            "parceiro": row.get("parceiro"), "nf": str(row.get("nf_numero")),
-            "tipo_genero": str(row.get("tipo_genero_item")),
-            "dt_emissao": row.get("data_emissao"),
-            "dt_entrada": row.get("data_entrada") if tipo_operacao == "entrada" else None,
-            "produto": row.get("produto"), "ncm": str(row.get("ncm")),
-            "cfop": int(row["cfop"]), "valor_produto": float(row.get("valor_produto") or 0),
-            "aliq_fcp": float(row.get("aliq_fcp") or 0) if "aliq_fcp" in cols else None,
-            "valor_fcp": float(row.get("valor_fcp") or 0) if "valor_fcp" in cols else None,
-            "aliq_icms": float(row.get("aliq_icms") or 0),
-            "base_icms": float(row.get("base_icms") or 0),
-            "valor_icms": float(row.get("valor_icms") or 0),
-            "valor_total": float(row.get("valor_total") or 0),
-            "uf": row.get("uf"), "prazo": int(row["prazo_dias"]) if pd.notna(row.get("prazo_dias")) else None,
-            "extras": json.dumps(extras, default=str),
-        })
-        inseridos += 1
-    session.commit()
-    return inseridos
+    colunas_extra = [c for c in cols if c.startswith("_")]
+    # Monta a partir de uma coluna real primeiro (fixa o número de linhas/índice do DataFrame) — atribuir
+    # um escalar (competencia_id, tipo_operacao) direto num DataFrame ainda vazio não funciona: o pandas
+    # não tem como saber quantas linhas replicar e a coluna sai inteira NaN (bug encontrado em 05/08/2026).
+    out = pd.DataFrame({"parceiro": df["parceiro"]})
+    out["competencia_id"] = competencia_id
+    out["tipo_operacao"] = tipo_operacao
+    out["nf_numero"] = df["nf_numero"].astype(str)
+    out["tipo_genero_item"] = df["tipo_genero_item"].astype(str)
+    out["data_emissao"] = pd.to_datetime(df["data_emissao"], errors="coerce").dt.date
+    out["data_entrada"] = (
+        pd.to_datetime(df["data_entrada"], errors="coerce").dt.date if tipo_operacao == "entrada" else None
+    )
+    out["produto"] = df["produto"]
+    out["ncm"] = df["ncm"].astype(str)
+    out["cfop"] = df["cfop"].astype(int)
+    out["valor_produto"] = df["valor_produto"].fillna(0).astype(float)
+    out["aliq_fcp"] = df["aliq_fcp"].fillna(0).astype(float) if "aliq_fcp" in cols else None
+    out["valor_fcp"] = df["valor_fcp"].fillna(0).astype(float) if "valor_fcp" in cols else None
+    out["aliq_icms"] = df["aliq_icms"].fillna(0).astype(float)
+    out["base_icms"] = df["base_icms"].fillna(0).astype(float)
+    out["valor_icms"] = df["valor_icms"].fillna(0).astype(float)
+    out["valor_total"] = df["valor_total"].fillna(0).astype(float)
+    out["uf"] = df["uf"]
+    out["prazo_dias"] = pd.to_numeric(df["prazo_dias"], errors="coerce").astype("Int64")
+
+    # colunas ainda não identificadas do export -> jsonb, para não perder dado nenhum
+    extras_df = df[colunas_extra].rename(columns=lambda c: c.lstrip("_"))
+    out["colunas_nao_identificadas"] = extras_df.apply(
+        lambda row: json.dumps(
+            {k: (None if pd.isna(v) else float(v)) for k, v in row.items()}, default=str
+        ),
+        axis=1,
+    )
+    return out[COLS_TABELA]
+
+
+def importar_arquivo(session, arquivo, tipo_operacao, competencia_id):
+    """`arquivo` pode ser um caminho (str/Path) ou um buffer tipo st.file_uploader."""
+    df = _preparar_dataframe(arquivo, tipo_operacao, competencia_id)
+    df.to_sql(
+        "notas_fiscais_itens", session.bind, if_exists="append", index=False,
+        method="multi", chunksize=500,
+    )
+    return len(df)
 
 
 def importar(session, empresa_cnpj, ano, mes, arquivo_entrada=None, arquivo_saida=None, substituir=False):
