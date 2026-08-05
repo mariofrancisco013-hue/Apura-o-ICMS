@@ -1,0 +1,28 @@
+filial_winthor,razao_social,cnpj,inscricao_estadual,inscricao_municipal,uf,regime,is_empresa_apurada
+1,Sodine Matriz,07.342.785/0001-20,06.101.178-9,300.539-9,CE,Lucro Real Trimestral,false
+3,Sodine Atacado Centro - Colombo,07.342.785/0005-53,06.316.811-1,606.964-9,CE,Lucro Real Trimestral,true
+4,Sodine Atacado Juazeiro,07.342.785/0011-00,06.370.384-0,109.024-9,CE,Lucro Real Trimestral,false
+5,Sodine Atacado Terezina,07.342.785/0012-82,19.471.136-6,,PI,Lucro Real Trimestral,false
+6,Super Supply Matriz,45.141.688/0001-68,07.047561-0,726.827-0,CE,Lucro Real Trimestral,false
+7,Teresina Distribuidora,48.288.160/0001-04,19.725.032-7,,PI,Lucro Presumido,false
+11,Sodine Varejo S. Dumont,07.342.785/0006-34,06.664.378-3,,CE,Lucro Real Trimestral,false
+16,Verde Comercio Matriz,38.119.369/0001-90,06.168895-9,560.728-0,CE,Lucro Real Trimestral,false
+17,Supplex Shopping Eusebio,29.404.299/0002-02,06.936378-1,20.001.732-3,CE,Lucro Presumido,false
+18,CLP Comercio,42.774.668/0001-36,07.030533-1,663508-3,CE,Lucro Presumido Sem movimento,false
+19,Supplex Major Facundo,29.404.299/0003-93,07.047576-8,728463-2,CE,Lucro Presumido,false
+21,Supplex North Shopping,29.404.299/0004-74,07.213118-7,,CE,Lucro Presumido,false
+22,Athelas,58.470.506/0001-44,07.229.368-3,,CE,Lucro Presumido,false
+42,Beto Empreendimentos,26.054.581/0001-38,ISENTO,4634616,CE,Lucro Presumido,false
+59,Super Supply - Nacional Gás,45.141.688/0002-49,07.229.205-9,971598-3,CE,Lucro Real Trimestral,false
+60,Prisma Distribuidora,06.342.699/0001-54,06.694.033-8,191.732-3,CE,Lucro Real Trimestral,false
+61,Supplex Matriz - O. Paiva,29.404.299/0001-21,06.852094-8,479.451-6,CE,Lucro Presumido,false
+62,CA4 - Empreendimentos,30.636.117/0001-27,ISENTO,486040-3,CE,Lucro Presumido,false
+63,Ultra Comercio - Matriz,38.184.070/0001-10,06.131.722-5,561.627-1,CE,Lucro Real Trimestral,false
+64,Nema Comercio,52.588.960/0001-18,07.163.890-3,,CE,Lucro Real Trimestral,false
+65,Supply LOG,53.248.689/0001-34,ISENTO,,CE,Lucro Presumido,false
+70,Ultra Comercio - Filial Recife,38.184.070/0002-09,0.996207-74,,PE,Lucro Real Trimestral,false
+,LISSE,15.096.895/0001-87,61233455,267996-5,CE,Simples Nacional,false
+,GDT,42.498.270/0001-14,ISENTO,659342-9,,Simples Nacional,false
+,32.809.145 - PEDRO,32.809.145/0001-24,68845928,661300-4,CE,Simples Nacional,false
+,CLAM,42.499.593/0001-22,ISENTO,659365-8,,Simples Nacional,false
+,GSCP Participações,42.787.141/0001-46,ISENTO,663736-1,,Sem movimento,false
