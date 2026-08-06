@@ -13,6 +13,8 @@ deve sinalizar duas situações para o analista revisar (não decide sozinho, s�
 import pandas as pd
 from sqlalchemy import text
 
+from lib.inconsistencias_util import gravar_grupos
+
 
 def listar_ncms_tributados(session, empresa_id: int) -> pd.DataFrame:
     """`descricao_oficial` vem da tabela de referência `ncm` (sql/005_ncm.sql, carregada por
@@ -75,41 +77,43 @@ def gerar_inconsistencias_ncm_tributado(session, competencia_id: int, empresa_id
         where ni.competencia_id = :cid and ni.ncm is not null and ce.is_transferencia = false
     """), {"cid": competencia_id}).mappings().all()
 
-    # Monta a lista em memória (Python puro, sem ida ao banco) e insere tudo de uma vez no fim — achado em
-    # 06/08/2026: com um INSERT síncrono por item classificado, "Calcular apuração" ficava lento em
+    # Monta os grupos em memória (Python puro, sem ida ao banco) e insere tudo de uma vez no fim — achado
+    # em 06/08/2026: com um INSERT síncrono por item classificado, "Calcular apuração" ficava lento em
     # relatórios de Saída com dezenas de milhares de linhas (mesmo problema já corrigido na importação em
     # 05/08, só que essa validação, adicionada depois, tinha ficado de fora daquela correção).
-    a_inserir = []
-    ja_sinalizado_novo = set()  # um NCM "novo" só gera 1 inconsistência por competência, mesmo em várias NFs
+    # Agrupamento (pedido em 06/08/2026, "um mesmo erro pode se repetir, é melhor que ele agrupe"):
+    # "ncm_tributado_como_st" agrupa por NCM+CFOP; "ncm_tributado_novo" já era por NCM só (um candidato novo
+    # não precisa repetir por CFOP) — a diferença agora é que TODOS os itens de cada grupo ficam vinculados
+    # em inconsistencia_itens, não só um exemplo.
+    grupos_st, grupos_novo = {}, {}
     for it in itens:
         ncm = it["ncm"]
         if ncm in cadastrados:
             if it["is_st"]:
-                descricao = (
-                    f"NCM {ncm} está cadastrado como tributado (não-ST) nesta empresa, mas apareceu no "
-                    f"CFOP {it['cfop']}, classificado como ST. Confira se o CFOP do lançamento está certo "
-                    f"ou se este produto mudou de regime tributário."
-                )
-                a_inserir.append({
-                    "competencia_id": competencia_id, "tipo": "ncm_tributado_como_st", "ncm": ncm,
-                    "cfop": it["cfop"], "nf_item_id": it["id"], "descricao": descricao,
-                })
-        elif not it["is_st"] and ncm not in ja_sinalizado_novo:
-            ja_sinalizado_novo.add(ncm)
-            descricao = (
-                f"NCM {ncm} apareceu como tributado (não-ST) no CFOP {it['cfop']}, mas ainda não está "
-                f"cadastrado na lista de NCMs tributados desta empresa. Confirme se deve ser incluído — "
-                f"aba 'NCMs Tributados' em ICMS Normal."
-            )
-            a_inserir.append({
-                "competencia_id": competencia_id, "tipo": "ncm_tributado_novo", "ncm": ncm,
-                "cfop": it["cfop"], "nf_item_id": it["id"], "descricao": descricao,
-            })
+                chave = f"{ncm}|{it['cfop']}"
+                if chave not in grupos_st:
+                    grupos_st[chave] = {"ncm": ncm, "cfop": it["cfop"], "item_ids": []}
+                grupos_st[chave]["item_ids"].append(it["id"])
+        elif not it["is_st"]:
+            if ncm not in grupos_novo:
+                grupos_novo[ncm] = {"ncm": ncm, "cfop": it["cfop"], "item_ids": []}
+            grupos_novo[ncm]["item_ids"].append(it["id"])
 
-    if not a_inserir:
-        return 0
-    df = pd.DataFrame(a_inserir, columns=[
-        "competencia_id", "tipo", "ncm", "cfop", "nf_item_id", "descricao",
-    ])
-    df.to_sql("inconsistencias", session.bind, if_exists="append", index=False, method="multi", chunksize=500)
-    return len(df)
+    for g in grupos_st.values():
+        n = len(g["item_ids"])
+        g["descricao"] = (
+            f"NCM {g['ncm']} está cadastrado como tributado (não-ST) nesta empresa, mas apareceu no CFOP "
+            f"{g['cfop']}, classificado como ST, em {n} item(ns) de NF nesta competência. Confira se o CFOP "
+            f"do lançamento está certo ou se este produto mudou de regime tributário."
+        )
+    for g in grupos_novo.values():
+        n = len(g["item_ids"])
+        g["descricao"] = (
+            f"NCM {g['ncm']} apareceu como tributado (não-ST) em {n} item(ns) de NF (ex: CFOP {g['cfop']}), "
+            f"mas ainda não está cadastrado na lista de NCMs tributados desta empresa. Confirme se deve ser "
+            f"incluído — aba 'NCMs Tributados' em ICMS Normal."
+        )
+
+    n1 = gravar_grupos(session, competencia_id, "ncm_tributado_como_st", grupos_st)
+    n2 = gravar_grupos(session, competencia_id, "ncm_tributado_novo", grupos_novo)
+    return n1 + n2

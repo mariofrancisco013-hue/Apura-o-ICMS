@@ -14,26 +14,19 @@ Validações cruzadas (geram registros em `inconsistencias` para a equipe revisa
    por NOME (heurística) contra a lista de empresas do grupo, e todo resultado é marcado como heurístico —
    precisa de confirmação manual, e o ideal é depois importar um relatório de cadastro de parceiros que
    traga o CNPJ para tornar isso exato.
-"""
+
+AGRUPAMENTO (pedido do usuário em 06/08/2026: "um mesmo erro pode se repetir, é melhor que ele agrupe"):
+cada função monta um dict {chave_agrupamento: {...,"item_ids": [...]}} — uma linha por combinação distinta
+do erro (por NCM, ou por parceiro+CFOP) — e delega a gravação para `inconsistencias_util.gravar_grupos`,
+que insere o resumo em `inconsistencias` (com `quantidade` = nº de itens) e o vínculo item a item em
+`inconsistencia_itens` (usado pela Planilha de Entrada/Saída para sinalizar a linha certa na grade — ver
+sql/008_agrupar_inconsistencias.sql)."""
 import re
-import pandas as pd
+from collections import defaultdict
+
 from sqlalchemy import text
 
-# Colunas de `inconsistencias` que estas validações preenchem — o resto (status, created_at etc.) usa o
-# default da tabela. Usado pelo bulk insert via pandas.to_sql (ver _inserir_bulk).
-_COLS_INCONSISTENCIA = ["competencia_id", "tipo", "ncm", "cfop", "nf_item_id", "descricao"]
-
-
-def _inserir_bulk(session, linhas: list[dict]) -> int:
-    """Insere em lote via to_sql (mesma técnica de app/lib/importacao.py) em vez de um INSERT por linha —
-    achado em 06/08/2026: gerar as inconsistências item a item, com um INSERT síncrono por linha, deixava
-    "Calcular apuração" visivelmente lento em relatórios grandes (dezenas de milhares de itens de Saída),
-    pelo mesmo motivo já corrigido na importação em 05/08 (muitas idas e voltas ao banco)."""
-    if not linhas:
-        return 0
-    df = pd.DataFrame(linhas, columns=_COLS_INCONSISTENCIA)
-    df.to_sql("inconsistencias", session.bind, if_exists="append", index=False, method="multi", chunksize=500)
-    return len(df)
+from lib.inconsistencias_util import gravar_grupos
 
 
 def _normaliza_nome(s: str) -> str:
@@ -46,8 +39,10 @@ def _normaliza_nome(s: str) -> str:
 
 def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
     """Compara, por NCM, o conjunto de classificações ST usadas na Entrada vs na Saída (ignorando itens de
-    transferência, que têm regra própria). Gera uma inconsistência por NCM cujo tratamento diverge entre os
-    dois lados. Retorna a quantidade de inconsistências geradas.
+    transferência, que têm regra própria). Gera UM grupo por NCM cujo tratamento diverge entre os dois
+    lados (já era agrupado por natureza — 1 NCM só aparece 1 vez mesmo que em centenas de itens; agora
+    também guarda TODOS os itens daquele NCM em `inconsistencia_itens`, não só um exemplo). Retorna a
+    quantidade de GRUPOS (NCMs) gerados.
 
     Limpa as inconsistências deste tipo geradas numa rodada anterior desta competência antes de inserir de
     novo — sem isso, clicar em "Calcular apuração" mais de uma vez duplicava as mesmas inconsistências
@@ -64,17 +59,16 @@ def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
         where ni.competencia_id = :cid and ce.is_transferencia = false and ni.ncm is not null
     """), {"cid": competencia_id}).mappings().all()
 
-    from collections import defaultdict
-    entrada_st = defaultdict(set)   # ncm -> {True, False} conforme aparece na entrada
+    entrada_st = defaultdict(set)      # ncm -> {True, False} conforme aparece na entrada
     saida_st = defaultdict(set)
-    exemplo_item = {}
+    itens_por_ncm = defaultdict(list)  # ncm -> [ids de item, entrada+saída]
 
     for r in rows:
         alvo = entrada_st if r["tipo_operacao"] == "entrada" else saida_st
         alvo[r["ncm"]].add(bool(r["is_st"]))
-        exemplo_item.setdefault((r["tipo_operacao"], r["ncm"]), r["id"])
+        itens_por_ncm[r["ncm"]].append(r["id"])
 
-    a_inserir = []
+    grupos = {}
     ncms = set(entrada_st) & set(saida_st)
     for ncm in ncms:
         e_st, s_st = entrada_st[ncm], saida_st[ncm]
@@ -84,22 +78,20 @@ def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
             entrada_regime = "ST" if e_st == {True} else "não-ST" if e_st == {False} else "misto"
             saida_regime = "ST" if s_st == {True} else "não-ST" if s_st == {False} else "misto"
             descricao = (
-                f"NCM {ncm}: entrou como {entrada_regime} mas saiu como {saida_regime} — "
-                f"tratamento de substituição tributária inconsistente entre Entrada e Saída."
+                f"NCM {ncm}: entrou como {entrada_regime} mas saiu como {saida_regime} — tratamento de "
+                f"substituição tributária inconsistente entre Entrada e Saída ({len(itens_por_ncm[ncm])} "
+                f"item(ns) de NF com esse NCM nesta competência)."
             )
-            a_inserir.append({
-                "competencia_id": competencia_id, "tipo": "ncm_st_inconsistente", "ncm": ncm,
-                "cfop": None, "nf_item_id": exemplo_item.get(("entrada", ncm)) or exemplo_item.get(("saida", ncm)),
-                "descricao": descricao,
-            })
-    return _inserir_bulk(session, a_inserir)
+            grupos[ncm] = {"ncm": ncm, "cfop": None, "descricao": descricao, "item_ids": itens_por_ncm[ncm]}
+
+    return gravar_grupos(session, competencia_id, "ncm_st_inconsistente", grupos)
 
 
 def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
-    """Heurística por nome (ver limitação no docstring do módulo) — todo item de transferência cujo
-    parceiro não corresponde por nome a nenhuma empresa cadastrada do grupo é sinalizado para revisão
-    manual. Limpa as inconsistências deste tipo de uma rodada anterior antes de inserir de novo (mesmo
-    motivo do ajuste em gerar_inconsistencias_ncm)."""
+    """Heurística por nome (ver limitação no docstring do módulo) — agrupa por (parceiro, CFOP): todo
+    parceiro que não corresponde por nome a nenhuma empresa cadastrada do grupo vira UM grupo por CFOP
+    usado, mesmo que apareça em várias notas fiscais diferentes. Limpa as inconsistências deste tipo de uma
+    rodada anterior antes de inserir de novo (mesmo motivo do ajuste em gerar_inconsistencias_ncm)."""
     session.execute(text("""
         delete from inconsistencias where competencia_id = :cid and tipo = 'transferencia_nao_vinculada'
     """), {"cid": competencia_id})
@@ -115,7 +107,7 @@ def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
         where ni.competencia_id = :cid and ce.is_transferencia = true
     """), {"cid": competencia_id}).mappings().all()
 
-    a_inserir = []
+    brutos = {}  # chave "parceiro_normalizado|cfop" -> {"cfop", "parceiro", "primeira_nf", "item_ids"}
     for it in itens:
         nome_parceiro = _normaliza_nome(it["parceiro"])
         match = any(
@@ -123,13 +115,23 @@ def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
             for nome_grupo in nomes_grupo
         )
         if not match:
-            descricao = (
-                f"NF {it['nf_numero']}, CFOP {it['cfop']} (transferência): parceiro \"{it['parceiro']}\" "
-                f"não corresponde por nome a nenhuma empresa cadastrada do grupo. HEURÍSTICA POR NOME — "
-                f"o relatório de origem não traz o CNPJ do parceiro, confirme manualmente antes de agir."
-            )
-            a_inserir.append({
-                "competencia_id": competencia_id, "tipo": "transferencia_nao_vinculada", "ncm": None,
-                "cfop": it["cfop"], "nf_item_id": it["id"], "descricao": descricao,
-            })
-    return _inserir_bulk(session, a_inserir)
+            chave = f"{nome_parceiro}|{it['cfop']}"
+            if chave not in brutos:
+                brutos[chave] = {
+                    "cfop": it["cfop"], "parceiro": it["parceiro"], "primeira_nf": it["nf_numero"],
+                    "item_ids": [],
+                }
+            brutos[chave]["item_ids"].append(it["id"])
+
+    grupos = {}
+    for chave, b in brutos.items():
+        n = len(b["item_ids"])
+        descricao = (
+            f"CFOP {b['cfop']} (transferência): parceiro \"{b['parceiro']}\" não corresponde por nome a "
+            f"nenhuma empresa cadastrada do grupo — {n} item(ns) de NF nesta competência (ex: NF "
+            f"{b['primeira_nf']}). HEURÍSTICA POR NOME — o relatório de origem não traz o CNPJ do parceiro, "
+            f"confirme manualmente antes de agir."
+        )
+        grupos[chave] = {"ncm": None, "cfop": b["cfop"], "descricao": descricao, "item_ids": b["item_ids"]}
+
+    return gravar_grupos(session, competencia_id, "transferencia_nao_vinculada", grupos)

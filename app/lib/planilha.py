@@ -16,12 +16,32 @@ COLUNAS_EDITAVEIS_ENTRADA = [
 ]
 COLUNAS_EDITAVEIS_SAIDA = COLUNAS_EDITAVEIS_ENTRADA  # mesmo conjunto de colunas visíveis para as duas abas
 
-# Coluna só de leitura, calculada via join. NÃO faz parte de COLUNAS_EDITAVEIS_* porque não é uma coluna
-# real de notas_fiscais_itens (salvar_itens_editados não deve tentar gravar nela).
-COLUNAS_TODAS = COLUNAS_EDITAVEIS_ENTRADA + ["ncm_descricao"]
+# Colunas só de leitura, calculadas via join. NÃO fazem parte de COLUNAS_EDITAVEIS_* porque não são colunas
+# reais de notas_fiscais_itens (salvar_itens_editados não deve tentar gravar nelas).
+COLUNAS_TODAS = COLUNAS_EDITAVEIS_ENTRADA + ["ncm_descricao", "inconsistencia"]
+
+# Rótulo curto por tipo de inconsistência, pra mostrar direto na grade (pedido do usuário em 06/08/2026:
+# "as inconsistencias encontradas não estão sendo apresentadas na planilha de entrada e saida") — a
+# descrição completa de cada uma continua só na aba Inconsistências, aqui é só um sinal de alerta.
+_LABELS_INCONSISTENCIA = {
+    "ncm_st_inconsistente": "NCM×ST divergente Entrada/Saída",
+    "transferencia_nao_vinculada": "Transferência não vinculada",
+    "ncm_tributado_como_st": "NCM tributado veio como ST",
+    "ncm_tributado_novo": "NCM tributado novo (não cadastrado)",
+}
 
 
-def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filtro=None, busca=None, limite=500):
+def _formatar_inconsistencia(tipos_raw):
+    """`tipos_raw` vem de um string_agg(distinct tipo, ',') do SQL — None/'' quando o item não tem
+    inconsistência pendente."""
+    if not tipos_raw:
+        return None
+    labels = [_LABELS_INCONSISTENCIA.get(t, t) for t in tipos_raw.split(",")]
+    return "⚠️ " + "; ".join(labels)
+
+
+def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filtro=None, busca=None,
+                    limite=500, somente_inconsistencia=False):
     """Devolve (DataFrame, total_sem_filtro_de_limite) — o total serve para avisar o usuário quando a
     tela está mostrando só uma parte dos itens.
 
@@ -29,7 +49,12 @@ def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filt
     empresa (aba NCMs Tributados) — pedido do usuário em 06/08/2026 ("traga a descrição dos NCMs
     tributados somente deles"). Para os demais NCMs a coluna fica em branco; a tabela de referência oficial
     completa (10.515 códigos, `ncm`) continua no banco, mas só é usada aqui através do cadastro de
-    tributados, não para todo NCM que aparecer na nota."""
+    tributados, não para todo NCM que aparecer na nota.
+
+    `inconsistencia` mostra um resumo (rótulo, não a descrição completa) de toda inconsistência PENDENTE
+    ligada a este item via `inconsistencia_itens` — pedido do usuário em 06/08/2026, antes só dava pra ver
+    na aba Inconsistências, separada da planilha. `somente_inconsistencia=True` filtra a grade para mostrar
+    só os itens com alguma inconsistência pendente."""
     where = ["ni.competencia_id = :cid", "ni.tipo_operacao = :tipo"]
     params = {"cid": competencia_id, "tipo": tipo_operacao, "empresa_id": empresa_id}
     if cfop_filtro:
@@ -39,6 +64,12 @@ def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filt
         where.append("(ni.nf_numero ilike :busca or ni.produto_codigo ilike :busca or "
                       "ni.produto_descricao ilike :busca or ni.parceiro ilike :busca)")
         params["busca"] = f"%{busca}%"
+    if somente_inconsistencia:
+        where.append("""exists (
+            select 1 from inconsistencia_itens ii2
+            join inconsistencias i2 on i2.id = ii2.inconsistencia_id and i2.status = 'pendente'
+            where ii2.nf_item_id = ni.id
+        )""")
     where_sql = " and ".join(where)
 
     total = session.execute(
@@ -49,17 +80,24 @@ def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filt
     rows = session.execute(text(f"""
         select ni.id, ni.nf_numero, ni.parceiro, ni.produto_codigo, ni.produto_descricao, ni.ncm, ni.cfop,
                ni.valor_produto, ni.aliq_icms, ni.base_icms, ni.valor_icms, ni.uf,
-               n.descricao as ncm_descricao
+               n.descricao as ncm_descricao, inc.tipos_pendentes
         from notas_fiscais_itens ni
         left join ncms_tributados t on t.ncm = ni.ncm and t.empresa_id = :empresa_id
         left join ncm n on n.codigo = t.ncm
+        left join lateral (
+            select string_agg(distinct i.tipo, ',') as tipos_pendentes
+            from inconsistencia_itens ii
+            join inconsistencias i on i.id = ii.inconsistencia_id and i.status = 'pendente'
+            where ii.nf_item_id = ni.id
+        ) inc on true
         where {where_sql}
         order by ni.nf_numero
         limit :limite
     """), params).mappings().all()
 
-    df = pd.DataFrame(rows, columns=COLUNAS_TODAS)
-    return df, total
+    df = pd.DataFrame(rows, columns=COLUNAS_EDITAVEIS_ENTRADA + ["ncm_descricao", "tipos_pendentes"])
+    df["inconsistencia"] = df["tipos_pendentes"].apply(_formatar_inconsistencia) if not df.empty else []
+    return df[COLUNAS_TODAS], total
 
 
 def salvar_itens_editados(session, df_original, df_editado):

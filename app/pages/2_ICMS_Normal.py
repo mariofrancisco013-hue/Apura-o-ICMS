@@ -113,9 +113,14 @@ def _aba_planilha(tipo_operacao, titulo):
                                key=f"busca_{tipo_operacao}")
         limite = c3.number_input("Máx. linhas na tela", min_value=50, max_value=5000, value=500, step=50,
                                   key=f"limite_{tipo_operacao}")
+        somente_inc = st.checkbox(
+            "⚠️ Mostrar só itens com inconsistência pendente", key=f"somente_inc_{tipo_operacao}",
+            help="Inconsistências geradas ao clicar em 'Calcular apuração' (aba Apuração) — ver também a "
+                 "aba Inconsistências para a descrição completa de cada uma."
+        )
 
         df, total = carregar_itens(session, cid, tipo_operacao, empresa_id, cfop_filtro, busca or None,
-                                    limite)
+                                    limite, somente_inconsistencia=somente_inc)
 
         if total > len(df):
             st.warning(f"Mostrando {len(df)} de {total} itens (use o filtro de CFOP ou busca para refinar, "
@@ -125,11 +130,18 @@ def _aba_planilha(tipo_operacao, titulo):
 
         editado = st.data_editor(
             df, use_container_width=True, height=420, num_rows="fixed", key=f"editor_{tipo_operacao}",
-            column_order=["id", "nf_numero", "parceiro", "produto_codigo", "produto_descricao", "ncm",
-                          "ncm_descricao", "cfop", "valor_produto", "aliq_icms", "base_icms", "valor_icms",
-                          "uf"],
+            column_order=["id", "inconsistencia", "nf_numero", "parceiro", "produto_codigo",
+                          "produto_descricao", "ncm", "ncm_descricao", "cfop", "valor_produto", "aliq_icms",
+                          "base_icms", "valor_icms", "uf"],
             column_config={
                 "id": st.column_config.NumberColumn("ID", disabled=True),
+                "inconsistencia": st.column_config.TextColumn(
+                    "⚠️ Inconsistência", disabled=True, width="medium",
+                    help="Sinaliza inconsistência(s) PENDENTE(s) ligada(s) a este item, geradas ao "
+                         "calcular a apuração. Em branco não é garantia de que está tudo certo — só que "
+                         "nenhuma das 4 validações automáticas pegou nada nesta linha. Descrição completa "
+                         "e opção de marcar como revisado/ignorar: aba Inconsistências."
+                ),
                 "produto_codigo": st.column_config.TextColumn("Código Produto"),
                 "produto_descricao": st.column_config.TextColumn("Descrição Produto", width="large"),
                 "ncm_descricao": st.column_config.TextColumn(
@@ -404,7 +416,10 @@ with aba_inconsistencias:
         "manualmente). NCM tributado como ST: um NCM cadastrado como 'tributado' na aba NCMs Tributados "
         "apareceu num item classificado como ST. NCM tributado novo: um NCM ainda não cadastrado apareceu "
         "como tributado (não-ST) — candidato a entrar na lista. Geradas ao clicar em 'Calcular apuração' "
-        "na aba Apuração."
+        "na aba Apuração. Ocorrências do mesmo erro (mesmo NCM, ou mesmo parceiro+CFOP) aparecem "
+        "AGRUPADAS numa linha só, com a quantidade de itens de NF por trás — pedido do usuário em "
+        "06/08/2026. Cada item afetado também fica sinalizado direto na Planilha de Entrada/Saída "
+        "(coluna ⚠️ Inconsistência)."
     )
 
     TIPOS_INCONSISTENCIA = [
@@ -417,16 +432,24 @@ with aba_inconsistencias:
 
     if status_filtro and tipo_filtro:
         itens_inc = session.execute(text("""
-            select id, tipo, ncm, cfop, descricao, status, revisado_por, revisado_em
+            select id, tipo, ncm, cfop, descricao, status, revisado_por, revisado_em, quantidade
             from inconsistencias
             where competencia_id = :cid and status = any(:status) and tipo = any(:tipo)
-            order by created_at desc
+            order by quantidade desc, created_at desc
         """), {"cid": cid, "status": status_filtro, "tipo": tipo_filtro}).mappings().all()
 
-        st.write(f"{len(itens_inc)} inconsistência(s) encontrada(s).")
+        total_itens_afetados = sum(item["quantidade"] or 1 for item in itens_inc)
+        st.write(f"{len(itens_inc)} inconsistência(s) (grupo(s)) encontrada(s) — {total_itens_afetados} "
+                 f"item(ns) de NF afetado(s) ao todo.")
         for item in itens_inc:
-            with st.expander(f"[{item['tipo']}] {item['descricao'][:100]}..."):
+            qtd = item["quantidade"] or 1
+            selo = f"{qtd}× " if qtd > 1 else ""
+            with st.expander(f"{selo}[{item['tipo']}] {item['descricao'][:90]}..."):
                 st.write(item["descricao"])
+                if qtd > 1:
+                    st.caption(f"Esse mesmo erro se repete em {qtd} itens de NF nesta competência "
+                               f"(agrupado numa linha só) — todos eles aparecem sinalizados na Planilha "
+                               f"de Entrada/Saída.")
                 c1, c2, _ = st.columns(3)
                 if c1.button("Marcar como revisado", key=f"rev_{item['id']}"):
                     session.execute(text("""
