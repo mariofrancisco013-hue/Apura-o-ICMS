@@ -16,17 +16,22 @@ COLUNAS_EDITAVEIS_ENTRADA = [
 ]
 COLUNAS_EDITAVEIS_SAIDA = COLUNAS_EDITAVEIS_ENTRADA  # mesmo conjunto de colunas visíveis para as duas abas
 
-# Coluna só de leitura, calculada via join com a tabela `ncm` (ver sql/005_ncm.sql) — mostra o que o
-# código NCM significa sem o analista precisar sair da tela. NÃO faz parte de COLUNAS_EDITAVEIS_* porque
-# não é uma coluna real de notas_fiscais_itens (salvar_itens_editados não deve tentar gravar nela).
+# Coluna só de leitura, calculada via join. NÃO faz parte de COLUNAS_EDITAVEIS_* porque não é uma coluna
+# real de notas_fiscais_itens (salvar_itens_editados não deve tentar gravar nela).
 COLUNAS_TODAS = COLUNAS_EDITAVEIS_ENTRADA + ["ncm_descricao"]
 
 
-def carregar_itens(session, competencia_id, tipo_operacao, cfop_filtro=None, busca=None, limite=500):
+def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filtro=None, busca=None, limite=500):
     """Devolve (DataFrame, total_sem_filtro_de_limite) — o total serve para avisar o usuário quando a
-    tela está mostrando só uma parte dos itens."""
+    tela está mostrando só uma parte dos itens.
+
+    `ncm_descricao` só vem preenchida para os NCMs que estão cadastrados como "tributados" para esta
+    empresa (aba NCMs Tributados) — pedido do usuário em 06/08/2026 ("traga a descrição dos NCMs
+    tributados somente deles"). Para os demais NCMs a coluna fica em branco; a tabela de referência oficial
+    completa (10.515 códigos, `ncm`) continua no banco, mas só é usada aqui através do cadastro de
+    tributados, não para todo NCM que aparecer na nota."""
     where = ["ni.competencia_id = :cid", "ni.tipo_operacao = :tipo"]
-    params = {"cid": competencia_id, "tipo": tipo_operacao}
+    params = {"cid": competencia_id, "tipo": tipo_operacao, "empresa_id": empresa_id}
     if cfop_filtro:
         where.append("ni.cfop = :cfop")
         params["cfop"] = cfop_filtro
@@ -44,7 +49,8 @@ def carregar_itens(session, competencia_id, tipo_operacao, cfop_filtro=None, bus
         select ni.id, ni.nf_numero, ni.parceiro, ni.produto, ni.ncm, ni.cfop, ni.valor_produto,
                ni.aliq_icms, ni.base_icms, ni.valor_icms, ni.uf, n.descricao as ncm_descricao
         from notas_fiscais_itens ni
-        left join ncm n on n.codigo = ni.ncm
+        left join ncms_tributados t on t.ncm = ni.ncm and t.empresa_id = :empresa_id
+        left join ncm n on n.codigo = t.ncm
         where {where_sql}
         order by ni.nf_numero
         limit :limite

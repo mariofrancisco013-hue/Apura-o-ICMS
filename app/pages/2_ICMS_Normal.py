@@ -81,7 +81,7 @@ def _aba_planilha(tipo_operacao, titulo):
                               key=f"limite_{tipo_operacao}")
 
     cfop_filtro = None if cfop_sel == "(todos)" else int(cfop_sel)
-    df, total = carregar_itens(session, cid, tipo_operacao, cfop_filtro, busca or None, limite)
+    df, total = carregar_itens(session, cid, tipo_operacao, empresa_id, cfop_filtro, busca or None, limite)
 
     if total > len(df):
         st.warning(f"Mostrando {len(df)} de {total} itens (use o filtro de CFOP ou busca para refinar, "
@@ -96,9 +96,10 @@ def _aba_planilha(tipo_operacao, titulo):
         column_config={
             "id": st.column_config.NumberColumn("ID", disabled=True),
             "ncm_descricao": st.column_config.TextColumn(
-                "O que é este NCM", disabled=True, width="large",
-                help="Descrição oficial da Tabela NCM (Receita Federal/Classif), só para consulta — não é "
-                     "gravada, vem de um cruzamento automático com o código NCM."
+                "NCM tributado — o quê", disabled=True, width="large",
+                help="Só preenche quando o NCM está cadastrado na aba 'NCMs Tributados' desta empresa — "
+                     "mostra a descrição oficial da Tabela NCM. Em branco não quer dizer que o NCM não "
+                     "existe, só que ele ainda não está nessa lista. Não é gravada, é só consulta."
             ),
             "valor_produto": coluna_moeda("Valor Produto"),
             "base_icms": coluna_moeda("Base ICMS"),
