@@ -114,6 +114,6 @@ def gerar_inconsistencias_ncm_tributado(session, competencia_id: int, empresa_id
             f"incluído — aba 'NCMs Tributados' em ICMS Normal."
         )
 
-    n1 = gravar_grupos(session, competencia_id, "ncm_tributado_como_st", grupos_st)
-    n2 = gravar_grupos(session, competencia_id, "ncm_tributado_novo", grupos_novo)
+    n1 = gravar_grupos(session, competencia_id, "ncm_tributado_como_st", grupos_st, empresa_id)
+    n2 = gravar_grupos(session, competencia_id, "ncm_tributado_novo", grupos_novo, empresa_id)
     return n1 + n2

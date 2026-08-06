@@ -13,6 +13,18 @@ processo do app ficando de pé entre interações, isso deixa tudo visivelmente 
 pequeno (QueuePool) que reaproveita conexões entre reruns do Streamlit, e a criação do engine agora usa
 st.cache_resource quando disponível (mais seguro contra condição de corrida entre sessões simultâneas do
 que a variável global simples de antes).
+
+CORREÇÃO "IDLE IN TRANSACTION" (06/08/2026): cada página do Streamlit chama `get_session()` uma vez e usa
+essa mesma sessão o script inteiro, mas nunca chama `session.close()` no fim — o script simplesmente
+termina, e o objeto Session vira lixo. O problema é que uma ORM Session do SQLAlchemy tem referências
+internas cíclicas, então o coletor de lixo do Python não fecha a conexão/transação na hora — ela pode
+ficar "pendurada" (estado "idle in transaction" no Postgres) por muito tempo, até o GC cíclico rodar. Isso
+já travou duas vezes um `alter table` no SQL Editor do Supabase (a conexão pendurada segurava um lock na
+tabela e o painel desistia por timeout). Corrigido aqui: o engine usa isolation_level="AUTOCOMMIT" — cada
+comando já vira sua própria transação, que fecha sozinha assim que termina, então não existe mais como uma
+conexão ficar "idle in transaction" nem por engano. Não muda nada no comportamento do app: todo ponto do
+código que grava dado já chamava `session.commit()` explicitamente antes disso (e não há nenhum
+`session.rollback()` no projeto que dependesse do modo anterior).
 """
 import os
 from sqlalchemy import create_engine
@@ -50,6 +62,7 @@ def _create_engine():
         max_overflow=5,
         pool_recycle=1800,   # recicla conexões a cada 30min — evita conexão "morta" pelo pooler do Supabase
         pool_pre_ping=True,  # testa a conexão antes de usar; reabre sozinho se caiu
+        isolation_level="AUTOCOMMIT",  # nunca deixa uma conexão "idle in transaction" pendurada (ver docstring)
     )
 
 

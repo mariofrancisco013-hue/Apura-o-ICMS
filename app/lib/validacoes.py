@@ -37,7 +37,7 @@ def _normaliza_nome(s: str) -> str:
     return s
 
 
-def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
+def gerar_inconsistencias_ncm(session, competencia_id: int, empresa_id: int = None) -> int:
     """Compara, por NCM, o conjunto de classificações ST usadas na Entrada vs na Saída (ignorando itens de
     transferência, que têm regra própria). Gera UM grupo por NCM cujo tratamento diverge entre os dois
     lados (já era agrupado por natureza — 1 NCM só aparece 1 vez mesmo que em centenas de itens; agora
@@ -84,10 +84,10 @@ def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
             )
             grupos[ncm] = {"ncm": ncm, "cfop": None, "descricao": descricao, "item_ids": itens_por_ncm[ncm]}
 
-    return gravar_grupos(session, competencia_id, "ncm_st_inconsistente", grupos)
+    return gravar_grupos(session, competencia_id, "ncm_st_inconsistente", grupos, empresa_id)
 
 
-def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
+def gerar_inconsistencias_transferencia(session, competencia_id: int, empresa_id: int = None) -> int:
     """Heurística por nome (ver limitação no docstring do módulo) — agrupa por (parceiro, CFOP): todo
     parceiro que não corresponde por nome a nenhuma empresa cadastrada do grupo vira UM grupo por CFOP
     usado, mesmo que apareça em várias notas fiscais diferentes. Limpa as inconsistências deste tipo de uma
@@ -134,4 +134,4 @@ def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
         )
         grupos[chave] = {"ncm": None, "cfop": b["cfop"], "descricao": descricao, "item_ids": b["item_ids"]}
 
-    return gravar_grupos(session, competencia_id, "transferencia_nao_vinculada", grupos)
+    return gravar_grupos(session, competencia_id, "transferencia_nao_vinculada", grupos, empresa_id)

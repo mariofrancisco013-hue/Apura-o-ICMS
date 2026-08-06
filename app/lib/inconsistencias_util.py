@@ -9,28 +9,56 @@ Quem gera a inconsistência monta um dict {chave_agrupamento: {"ncm": ..., "cfop
 em lote, (2) busca de volta os ids gerados (bigserial, não dá pra saber direto do INSERT em lote via
 pandas.to_sql) pela chave_agrupamento, (3) grava o vínculo grupo->itens em `inconsistencia_itens`, também
 em lote — mesma técnica de bulk insert já usada em app/lib/importacao.py, evita 1 INSERT por item.
+
+"APRENDIZADO" (pedido em 06/08/2026, ver sql/009_excecoes_inconsistencia.sql): antes de gravar, cada grupo
+é conferido contra `excecoes_inconsistencia` — regras que o analista criou em competências anteriores
+marcando "revisar com justificativa + replicar nas próximas apurações". Se a combinação
+(empresa, tipo, chave_agrupamento) tiver uma exceção ATIVA, o grupo ainda é gravado (fica no histórico),
+mas já nasce com status='revisado' e a justificativa preenchida — não aparece como pendente pro analista
+de novo.
 """
 import pandas as pd
 from sqlalchemy import text
 
 
-def gravar_grupos(session, competencia_id: int, tipo: str, grupos: dict) -> int:
+def buscar_excecoes_ativas(session, empresa_id: int, tipo: str) -> dict:
+    """chave_agrupamento -> justificativa, só das exceções ativas desta empresa/tipo."""
+    rows = session.execute(text("""
+        select chave_agrupamento, justificativa from excecoes_inconsistencia
+        where empresa_id = :eid and tipo = :tipo and ativa = true
+    """), {"eid": empresa_id, "tipo": tipo}).mappings().all()
+    return {r["chave_agrupamento"]: r["justificativa"] for r in rows}
+
+
+def gravar_grupos(session, competencia_id: int, tipo: str, grupos: dict, empresa_id: int = None) -> int:
     """`grupos`: chave_agrupamento -> {"ncm": str|None, "cfop": int|None, "descricao": str,
     "item_ids": list[int]}. Retorna quantos GRUPOS foram gravados (não quantos itens).
 
     Pré-requisito: quem chama já deve ter apagado as inconsistências antigas deste `tipo`/competência
-    antes (e dado commit) — esta função só insere, não limpa nada."""
+    antes (e dado commit) — esta função só insere, não limpa nada.
+
+    Se `empresa_id` for informado, aplica as exceções conhecidas (ver docstring do módulo) — grupos que
+    batem com uma regra ativa já nascem revisados, com a justificativa da regra."""
     if not grupos:
         return 0
 
-    linhas = [{
-        "competencia_id": competencia_id, "tipo": tipo, "ncm": g.get("ncm"), "cfop": g.get("cfop"),
-        "nf_item_id": (g["item_ids"][0] if g["item_ids"] else None),
-        "descricao": g["descricao"], "chave_agrupamento": chave, "quantidade": len(g["item_ids"]),
-    } for chave, g in grupos.items()]
+    excecoes = buscar_excecoes_ativas(session, empresa_id, tipo) if empresa_id else {}
+
+    linhas = []
+    for chave, g in grupos.items():
+        justificativa_regra = excecoes.get(chave)
+        linhas.append({
+            "competencia_id": competencia_id, "tipo": tipo, "ncm": g.get("ncm"), "cfop": g.get("cfop"),
+            "nf_item_id": (g["item_ids"][0] if g["item_ids"] else None),
+            "descricao": g["descricao"], "chave_agrupamento": chave, "quantidade": len(g["item_ids"]),
+            "status": "revisado" if justificativa_regra else "pendente",
+            "justificativa": justificativa_regra,
+            "aplicada_por_excecao": justificativa_regra is not None,
+        })
 
     df = pd.DataFrame(linhas, columns=[
         "competencia_id", "tipo", "ncm", "cfop", "nf_item_id", "descricao", "chave_agrupamento", "quantidade",
+        "status", "justificativa", "aplicada_por_excecao",
     ])
     df.to_sql("inconsistencias", session.bind, if_exists="append", index=False, method="multi", chunksize=500)
 

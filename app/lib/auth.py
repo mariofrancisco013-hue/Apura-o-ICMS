@@ -38,11 +38,21 @@ def require_login():
             resp = client.auth.sign_in_with_password({"email": email, "password": senha})
             st.session_state["supabase_session"] = resp.session
             st.session_state["user_email"] = resp.user.email
+            st.session_state["user_id"] = resp.user.id
             st.rerun()
         except Exception as e:
             st.error(f"Falha no login: {e}")
 
     st.stop()
+
+
+def usuario_atual() -> dict:
+    """{"id": uuid|None, "email": str|None} do usuário logado — usado para registrar quem criou uma
+    exceção/revisão (excecoes_inconsistencia.criado_por, inconsistencias.revisado_por)."""
+    return {
+        "id": st.session_state.get("user_id"),
+        "email": st.session_state.get("user_email"),
+    }
 
 
 def logout_button():

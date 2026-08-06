@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 import pandas as pd
-from lib.auth import require_login, logout_button
+from lib.auth import require_login, logout_button, usuario_atual
 from lib.db import get_session
 from lib.planilha import (
     carregar_itens, salvar_itens_editados, resumo_por_cfop, carregar_totalizador,
@@ -332,8 +332,8 @@ with aba_apuracao:
         with st.spinner("Calculando..."):
             linhas = calcular_apuracao_icms_normal(session, cid)
             salvar_apuracao(session, cid, linhas)
-            n_ncm = gerar_inconsistencias_ncm(session, cid)
-            n_transf = gerar_inconsistencias_transferencia(session, cid)
+            n_ncm = gerar_inconsistencias_ncm(session, cid, empresa_id)
+            n_transf = gerar_inconsistencias_transferencia(session, cid, empresa_id)
             n_ncm_trib = gerar_inconsistencias_ncm_tributado(session, cid, empresa_id)
             session.execute(text("update competencias set status = 'calculada' where id = :cid"), {"cid": cid})
             session.commit()
@@ -417,9 +417,9 @@ with aba_inconsistencias:
         "apareceu num item classificado como ST. NCM tributado novo: um NCM ainda não cadastrado apareceu "
         "como tributado (não-ST) — candidato a entrar na lista. Geradas ao clicar em 'Calcular apuração' "
         "na aba Apuração. Ocorrências do mesmo erro (mesmo NCM, ou mesmo parceiro+CFOP) aparecem "
-        "AGRUPADAS numa linha só, com a quantidade de itens de NF por trás — pedido do usuário em "
-        "06/08/2026. Cada item afetado também fica sinalizado direto na Planilha de Entrada/Saída "
-        "(coluna ⚠️ Inconsistência)."
+        "AGRUPADAS numa linha só, com a quantidade de itens de NF por trás — revisar/ignorar/justificar o "
+        "grupo já vale para todos os itens dele de uma vez. Cada item afetado também fica sinalizado "
+        "direto na Planilha de Entrada/Saída (coluna ⚠️ Inconsistência)."
     )
 
     TIPOS_INCONSISTENCIA = [
@@ -432,7 +432,8 @@ with aba_inconsistencias:
 
     if status_filtro and tipo_filtro:
         itens_inc = session.execute(text("""
-            select id, tipo, ncm, cfop, descricao, status, revisado_por, revisado_em, quantidade
+            select id, tipo, ncm, cfop, descricao, status, revisado_por, revisado_em, quantidade,
+                   chave_agrupamento, justificativa, aplicada_por_excecao
             from inconsistencias
             where competencia_id = :cid and status = any(:status) and tipo = any(:tipo)
             order by quantidade desc, created_at desc
@@ -444,22 +445,97 @@ with aba_inconsistencias:
         for item in itens_inc:
             qtd = item["quantidade"] or 1
             selo = f"{qtd}× " if qtd > 1 else ""
-            with st.expander(f"{selo}[{item['tipo']}] {item['descricao'][:90]}..."):
+            marca_auto = " 🔁" if item["aplicada_por_excecao"] else ""
+            with st.expander(f"{selo}[{item['tipo']}] {item['descricao'][:90]}...{marca_auto}"):
                 st.write(item["descricao"])
                 if qtd > 1:
                     st.caption(f"Esse mesmo erro se repete em {qtd} itens de NF nesta competência "
-                               f"(agrupado numa linha só) — todos eles aparecem sinalizados na Planilha "
-                               f"de Entrada/Saída.")
-                c1, c2, _ = st.columns(3)
-                if c1.button("Marcar como revisado", key=f"rev_{item['id']}"):
-                    session.execute(text("""
-                        update inconsistencias set status='revisado', revisado_em=now() where id=:id
-                    """), {"id": item["id"]})
-                    session.commit()
-                    st.rerun()
-                if c2.button("Ignorar", key=f"ign_{item['id']}"):
-                    session.execute(text("""
-                        update inconsistencias set status='ignorado', revisado_em=now() where id=:id
-                    """), {"id": item["id"]})
-                    session.commit()
-                    st.rerun()
+                               f"(agrupado numa linha só) — revisar/ignorar/justificar AQUI resolve os "
+                               f"{qtd} itens de uma vez, todos eles somem do alerta na Planilha.")
+                if item["aplicada_por_excecao"]:
+                    st.info(f"🔁 Aplicado automaticamente — bateu com uma exceção conhecida cadastrada "
+                            f"numa competência anterior. Justificativa: {item['justificativa']}")
+                elif item["justificativa"]:
+                    st.info(f"Justificativa: {item['justificativa']}")
+
+                with st.form(f"form_inc_{item['id']}"):
+                    justificativa = st.text_area(
+                        "Justificativa (opcional, mas obrigatória se marcar 'replicar')",
+                        value=item["justificativa"] or "", key=f"just_{item['id']}",
+                    )
+                    replicar = st.checkbox(
+                        "🔁 Aplicar automaticamente nas próximas apurações desta empresa (não perguntar "
+                        "de novo este mesmo caso — mesmo NCM/parceiro+CFOP)",
+                        key=f"replicar_{item['id']}",
+                        help="Cria uma regra: da próxima vez que este mesmo NCM (ou parceiro+CFOP) "
+                             "aparecer numa apuração futura desta empresa, a inconsistência já nasce "
+                             "revisada com esta justificativa, sem pedir revisão de novo.",
+                    )
+                    fc1, fc2, fc3 = st.columns(3)
+                    revisar = fc1.form_submit_button("✅ Marcar como revisado")
+                    ignorar = fc2.form_submit_button("🚫 Ignorar")
+                    salvar_just = fc3.form_submit_button("💾 Só salvar justificativa")
+
+                if revisar or ignorar or salvar_just:
+                    if replicar and not justificativa.strip():
+                        st.error("Pra replicar nas próximas apurações, escreve a justificativa primeiro.")
+                    else:
+                        novo_status = "revisado" if revisar else ("ignorado" if ignorar else item["status"])
+                        usuario = usuario_atual()
+                        session.execute(text("""
+                            update inconsistencias
+                            set status=:status, revisado_em=now(), revisado_por=:uid, justificativa=:just
+                            where id=:id
+                        """), {
+                            "status": novo_status, "uid": usuario["id"], "just": justificativa.strip() or None,
+                            "id": item["id"],
+                        })
+                        if replicar:
+                            session.execute(text("""
+                                insert into excecoes_inconsistencia
+                                    (empresa_id, tipo, chave_agrupamento, ncm, cfop, justificativa,
+                                     ativa, criado_por, criado_por_email)
+                                values (:eid, :tipo, :chave, :ncm, :cfop, :just, true, :uid, :email)
+                                on conflict (empresa_id, tipo, chave_agrupamento) do update
+                                    set justificativa = excluded.justificativa, ativa = true,
+                                        created_at = now(), criado_por = excluded.criado_por,
+                                        criado_por_email = excluded.criado_por_email
+                            """), {
+                                "eid": empresa_id, "tipo": item["tipo"], "chave": item["chave_agrupamento"],
+                                "ncm": item["ncm"], "cfop": item["cfop"], "just": justificativa.strip(),
+                                "uid": usuario["id"], "email": usuario["email"],
+                            })
+                        session.commit()
+                        st.rerun()
+
+    st.markdown("---")
+    with st.expander("🔁 Exceções conhecidas (regras aplicadas automaticamente nas próximas apurações)"):
+        st.caption(
+            "Quando você marca 'replicar nas próximas apurações' acima, a regra entra aqui. Desative se a "
+            "situação mudar e você quiser voltar a ser avisado sobre esse mesmo caso."
+        )
+        excecoes = session.execute(text("""
+            select id, tipo, ncm, cfop, chave_agrupamento, justificativa, ativa, criado_por_email, created_at
+            from excecoes_inconsistencia
+            where empresa_id = :eid
+            order by ativa desc, created_at desc
+        """), {"eid": empresa_id}).mappings().all()
+        if not excecoes:
+            st.caption("Nenhuma exceção cadastrada ainda para esta empresa.")
+        for exc in excecoes:
+            status_txt = "🟢 ativa" if exc["ativa"] else "⚪ desativada"
+            with st.expander(f"[{exc['tipo']}] {exc['chave_agrupamento']} — {status_txt}"):
+                st.write(exc["justificativa"])
+                st.caption(f"Criada por {exc['criado_por_email'] or '?'} em {exc['created_at']}")
+                if exc["ativa"]:
+                    if st.button("Desativar (voltar a sinalizar este caso)", key=f"desativar_exc_{exc['id']}"):
+                        session.execute(text("update excecoes_inconsistencia set ativa=false where id=:id"),
+                                         {"id": exc["id"]})
+                        session.commit()
+                        st.rerun()
+                else:
+                    if st.button("Reativar", key=f"reativar_exc_{exc['id']}"):
+                        session.execute(text("update excecoes_inconsistencia set ativa=true where id=:id"),
+                                         {"id": exc["id"]})
+                        session.commit()
+                        st.rerun()
