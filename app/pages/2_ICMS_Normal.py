@@ -7,7 +7,7 @@ import pandas as pd
 from lib.auth import require_login, logout_button
 from lib.db import get_session
 from lib.planilha import (
-    carregar_itens, salvar_itens_editados, resumo_por_cfop,
+    carregar_itens, salvar_itens_editados, resumo_por_cfop, carregar_totalizador,
     carregar_checkpoint_1024_editavel, salvar_checkpoint_1024_bulk,
     carregar_checkpoint_1025_editavel, salvar_checkpoint_1025_bulk,
 )
@@ -72,47 +72,84 @@ def _aba_planilha(tipo_operacao, titulo):
         "Ajuste diretamente na grade (igual planilha) se algum CFOP, NCM ou valor estiver errado no "
         "relatório original. As mudanças só valem para esta competência e não alteram o arquivo .xls."
     )
+
+    visao = st.radio(
+        "Visão", ["Analítica (item a item)", "Sintética (totalizada por UF, Código do Produto e Alíquota)"],
+        horizontal=True, key=f"visao_{tipo_operacao}",
+        help="Sintética soma os itens por UF + Código do Produto + Alíquota de ICMS — útil para conferir "
+             "volumes sem rolar item a item. Analítica mostra e permite editar nota a nota.",
+    )
+    sintetica = visao.startswith("Sintética")
+
     c1, c2, c3 = st.columns([2, 3, 2])
     resumo = resumo_por_cfop(session, cid, tipo_operacao)
     cfops_disponiveis = ["(todos)"] + resumo["cfop"].tolist() if not resumo.empty else ["(todos)"]
     cfop_sel = c1.selectbox("Filtrar por CFOP", cfops_disponiveis, key=f"cfop_{tipo_operacao}")
-    busca = c2.text_input("Buscar por NF, produto ou parceiro", key=f"busca_{tipo_operacao}")
-    limite = c3.number_input("Máx. linhas na tela", min_value=50, max_value=5000, value=500, step=50,
-                              key=f"limite_{tipo_operacao}")
-
     cfop_filtro = None if cfop_sel == "(todos)" else int(cfop_sel)
-    df, total = carregar_itens(session, cid, tipo_operacao, empresa_id, cfop_filtro, busca or None, limite)
 
-    if total > len(df):
-        st.warning(f"Mostrando {len(df)} de {total} itens (use o filtro de CFOP ou busca para refinar, "
-                   f"ou aumente o limite acima — grades muito grandes deixam o navegador lento).")
+    if sintetica:
+        c2.empty()
+        limite = c3.number_input("Máx. linhas na tela", min_value=50, max_value=5000, value=500, step=50,
+                                  key=f"limite_{tipo_operacao}")
+        tot = carregar_totalizador(session, cid, tipo_operacao, cfop_filtro)
+        st.caption(f"{len(tot)} combinação(ões) de UF + Código do Produto + Alíquota"
+                   f"{' para este CFOP' if cfop_filtro else ''}.")
+        st.dataframe(
+            _formatar_moeda_df(tot.head(limite), ["valor_produto", "base_icms", "valor_icms"]),
+            use_container_width=True, height=420,
+            column_config={
+                "uf": st.column_config.TextColumn("UF"),
+                "produto_codigo": st.column_config.TextColumn("Código Produto"),
+                "produto_descricao": st.column_config.TextColumn("Descrição Produto", width="large"),
+                "aliq_icms": st.column_config.NumberColumn("Alíquota ICMS %", format="%.2f"),
+                "n_itens": st.column_config.NumberColumn("Nº itens"),
+                "valor_produto": st.column_config.TextColumn("Valor Produto"),
+                "base_icms": st.column_config.TextColumn("Base ICMS"),
+                "valor_icms": st.column_config.TextColumn("Valor ICMS"),
+            },
+        )
     else:
-        st.caption(f"{total} itens.")
+        busca = c2.text_input("Buscar por NF, código/descrição do produto ou parceiro",
+                               key=f"busca_{tipo_operacao}")
+        limite = c3.number_input("Máx. linhas na tela", min_value=50, max_value=5000, value=500, step=50,
+                                  key=f"limite_{tipo_operacao}")
 
-    editado = st.data_editor(
-        df, use_container_width=True, height=420, num_rows="fixed", key=f"editor_{tipo_operacao}",
-        column_order=["id", "nf_numero", "parceiro", "produto", "ncm", "ncm_descricao", "cfop",
-                      "valor_produto", "aliq_icms", "base_icms", "valor_icms", "uf"],
-        column_config={
-            "id": st.column_config.NumberColumn("ID", disabled=True),
-            "ncm_descricao": st.column_config.TextColumn(
-                "NCM tributado — o quê", disabled=True, width="large",
-                help="Só preenche quando o NCM está cadastrado na aba 'NCMs Tributados' desta empresa — "
-                     "mostra a descrição oficial da Tabela NCM. Em branco não quer dizer que o NCM não "
-                     "existe, só que ele ainda não está nessa lista. Não é gravada, é só consulta."
-            ),
-            "valor_produto": coluna_moeda("Valor Produto"),
-            "base_icms": coluna_moeda("Base ICMS"),
-            "valor_icms": coluna_moeda("Valor ICMS"),
-        },
-    )
-    if st.button("💾 Salvar alterações", key=f"salvar_{tipo_operacao}"):
-        n = salvar_itens_editados(session, df, editado)
-        if n:
-            st.success(f"{n} linha(s) atualizada(s).")
+        df, total = carregar_itens(session, cid, tipo_operacao, empresa_id, cfop_filtro, busca or None,
+                                    limite)
+
+        if total > len(df):
+            st.warning(f"Mostrando {len(df)} de {total} itens (use o filtro de CFOP ou busca para refinar, "
+                       f"ou aumente o limite acima — grades muito grandes deixam o navegador lento).")
         else:
-            st.info("Nenhuma mudança detectada.")
-        st.rerun()
+            st.caption(f"{total} itens.")
+
+        editado = st.data_editor(
+            df, use_container_width=True, height=420, num_rows="fixed", key=f"editor_{tipo_operacao}",
+            column_order=["id", "nf_numero", "parceiro", "produto_codigo", "produto_descricao", "ncm",
+                          "ncm_descricao", "cfop", "valor_produto", "aliq_icms", "base_icms", "valor_icms",
+                          "uf"],
+            column_config={
+                "id": st.column_config.NumberColumn("ID", disabled=True),
+                "produto_codigo": st.column_config.TextColumn("Código Produto"),
+                "produto_descricao": st.column_config.TextColumn("Descrição Produto", width="large"),
+                "ncm_descricao": st.column_config.TextColumn(
+                    "NCM tributado — o quê", disabled=True, width="large",
+                    help="Só preenche quando o NCM está cadastrado na aba 'NCMs Tributados' desta empresa "
+                         "— mostra a descrição oficial da Tabela NCM. Em branco não quer dizer que o NCM "
+                         "não existe, só que ele ainda não está nessa lista. Não é gravada, é só consulta."
+                ),
+                "valor_produto": coluna_moeda("Valor Produto"),
+                "base_icms": coluna_moeda("Base ICMS"),
+                "valor_icms": coluna_moeda("Valor ICMS"),
+            },
+        )
+        if st.button("💾 Salvar alterações", key=f"salvar_{tipo_operacao}"):
+            n = salvar_itens_editados(session, df, editado)
+            if n:
+                st.success(f"{n} linha(s) atualizada(s).")
+            else:
+                st.info("Nenhuma mudança detectada.")
+            st.rerun()
 
     st.markdown("---")
     st.subheader("Resumo por CFOP")

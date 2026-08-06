@@ -11,7 +11,7 @@ import pandas as pd
 from sqlalchemy import text
 
 COLUNAS_EDITAVEIS_ENTRADA = [
-    "id", "nf_numero", "parceiro", "produto", "ncm", "cfop", "valor_produto",
+    "id", "nf_numero", "parceiro", "produto_codigo", "produto_descricao", "ncm", "cfop", "valor_produto",
     "aliq_icms", "base_icms", "valor_icms", "uf",
 ]
 COLUNAS_EDITAVEIS_SAIDA = COLUNAS_EDITAVEIS_ENTRADA  # mesmo conjunto de colunas visíveis para as duas abas
@@ -36,7 +36,8 @@ def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filt
         where.append("ni.cfop = :cfop")
         params["cfop"] = cfop_filtro
     if busca:
-        where.append("(ni.nf_numero ilike :busca or ni.produto ilike :busca or ni.parceiro ilike :busca)")
+        where.append("(ni.nf_numero ilike :busca or ni.produto_codigo ilike :busca or "
+                      "ni.produto_descricao ilike :busca or ni.parceiro ilike :busca)")
         params["busca"] = f"%{busca}%"
     where_sql = " and ".join(where)
 
@@ -46,8 +47,9 @@ def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filt
 
     params["limite"] = limite
     rows = session.execute(text(f"""
-        select ni.id, ni.nf_numero, ni.parceiro, ni.produto, ni.ncm, ni.cfop, ni.valor_produto,
-               ni.aliq_icms, ni.base_icms, ni.valor_icms, ni.uf, n.descricao as ncm_descricao
+        select ni.id, ni.nf_numero, ni.parceiro, ni.produto_codigo, ni.produto_descricao, ni.ncm, ni.cfop,
+               ni.valor_produto, ni.aliq_icms, ni.base_icms, ni.valor_icms, ni.uf,
+               n.descricao as ncm_descricao
         from notas_fiscais_itens ni
         left join ncms_tributados t on t.ncm = ni.ncm and t.empresa_id = :empresa_id
         left join ncm n on n.codigo = t.ncm
@@ -85,7 +87,8 @@ def salvar_itens_editados(session, df_original, df_editado):
         if mudou:
             session.execute(text("""
                 update notas_fiscais_itens
-                set nf_numero=:nf_numero, parceiro=:parceiro, produto=:produto, ncm=:ncm, cfop=:cfop,
+                set nf_numero=:nf_numero, parceiro=:parceiro, produto_codigo=:produto_codigo,
+                    produto_descricao=:produto_descricao, ncm=:ncm, cfop=:cfop,
                     valor_produto=:valor_produto, aliq_icms=:aliq_icms, base_icms=:base_icms,
                     valor_icms=:valor_icms, uf=:uf
                 where id=:id
@@ -106,6 +109,36 @@ def resumo_por_cfop(session, competencia_id, tipo_operacao):
         order by ni.cfop
     """), {"cid": competencia_id, "tipo": tipo_operacao}).mappings().all()
     return pd.DataFrame(rows, columns=["cfop", "descricao", "n", "base", "icms"])
+
+
+def carregar_totalizador(session, competencia_id, tipo_operacao, cfop_filtro=None):
+    """Visão SINTÉTICA da planilha — pedido do usuário em 06/08/2026: poder analisar Entrada/Saída
+    totalizado por UF + Código do Produto + Alíquota de ICMS, em vez de item a item (visão ANALÍTICA, que
+    continua disponível — o analista escolhe qual das duas quer ver, não substitui uma pela outra).
+
+    Junta produto_descricao pelo `min()` (assume que o mesmo código de produto tem sempre a mesma
+    descrição — é o caso normal; se não for, ainda soma certo, só a descrição mostrada na linha totalizada
+    pode não refletir 100% das notas por trás)."""
+    where = ["ni.competencia_id = :cid", "ni.tipo_operacao = :tipo"]
+    params = {"cid": competencia_id, "tipo": tipo_operacao}
+    if cfop_filtro:
+        where.append("ni.cfop = :cfop")
+        params["cfop"] = cfop_filtro
+    where_sql = " and ".join(where)
+
+    rows = session.execute(text(f"""
+        select ni.uf, ni.produto_codigo, min(ni.produto_descricao) as produto_descricao, ni.aliq_icms,
+               count(*) as n_itens, sum(ni.valor_produto) as valor_produto,
+               sum(ni.base_icms) as base_icms, sum(ni.valor_icms) as valor_icms
+        from notas_fiscais_itens ni
+        where {where_sql}
+        group by ni.uf, ni.produto_codigo, ni.aliq_icms
+        order by ni.uf, ni.produto_codigo, ni.aliq_icms
+    """), params).mappings().all()
+    return pd.DataFrame(rows, columns=[
+        "uf", "produto_codigo", "produto_descricao", "aliq_icms", "n_itens",
+        "valor_produto", "base_icms", "valor_icms",
+    ])
 
 
 # Faixa de CFOP por direção (padrão nacional): 1xxx/2xxx/3xxx = Entrada, 5xxx/6xxx/7xxx = Saída. Usado só

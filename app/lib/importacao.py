@@ -30,8 +30,8 @@ COLS_SAIDA = [
 # Colunas finais da tabela notas_fiscais_itens que este módulo preenche (na ordem do INSERT via to_sql)
 COLS_TABELA = [
     "competencia_id", "tipo_operacao", "parceiro", "nf_numero", "tipo_genero_item",
-    "data_emissao", "data_entrada", "produto", "ncm", "cfop", "valor_produto",
-    "aliq_fcp", "valor_fcp", "aliq_icms", "base_icms", "valor_icms", "valor_total",
+    "data_emissao", "data_entrada", "produto", "produto_codigo", "produto_descricao", "ncm", "cfop",
+    "valor_produto", "aliq_fcp", "valor_fcp", "aliq_icms", "base_icms", "valor_icms", "valor_total",
     "uf", "prazo_dias", "colunas_nao_identificadas",
 ]
 
@@ -98,6 +98,18 @@ def checar_duplicacao(session, competencia_id, tipos, substituir):
     return n or 0
 
 
+def _dividir_codigo_descricao(valor):
+    """Separa a célula "Produto" do Winthor ("<código> - <descrição>") em (codigo, descricao). Sem
+    separador " - " ou célula vazia -> (None, texto inteiro ou None)."""
+    if pd.isna(valor):
+        return None, None
+    texto = str(valor).strip()
+    if " - " in texto:
+        codigo, descricao = texto.split(" - ", 1)
+        return codigo.strip(), descricao.strip()
+    return None, texto or None
+
+
 def _preparar_dataframe(arquivo, tipo_operacao, competencia_id):
     """Lê o .xls e devolve um DataFrame já no formato exato da tabela notas_fiscais_itens, pronto para
     to_sql — nenhum loop linha a linha."""
@@ -124,6 +136,14 @@ def _preparar_dataframe(arquivo, tipo_operacao, competencia_id):
         pd.to_datetime(df["data_entrada"], errors="coerce").dt.date if tipo_operacao == "entrada" else None
     )
     out["produto"] = df["produto"]
+    # separa código e descrição do produto — pedido do usuário em 06/08/2026. No export Winthor a célula
+    # vem inteira, no formato "<código> - <descrição>" (ex: "000123 - TESOURA FUTURO"). Quando não há
+    # " - " (formato inesperado) ou a célula está vazia, joga o que tiver em produto_descricao e deixa
+    # produto_codigo em branco — mais seguro que adivinhar errado onde o código termina. Usa .apply (em vez
+    # de operação vetorizada com .astype(str)) para não transformar valor vazio/NaN na string literal "nan".
+    _splits = df["produto"].apply(_dividir_codigo_descricao)
+    out["produto_codigo"] = _splits.apply(lambda par: par[0])
+    out["produto_descricao"] = _splits.apply(lambda par: par[1])
     out["ncm"] = df["ncm"].astype(str)
     out["cfop"] = df["cfop"].astype(int)
     out["valor_produto"] = df["valor_produto"].fillna(0).astype(float)
