@@ -202,8 +202,8 @@ def carregar_historico_edicoes(session, competencia_id, tipo_operacao, limite=20
     """Lista os ajustes manuais feitos na grade desta competência/tipo_operacao, mais recentes primeiro —
     pedido do usuário em 06/08/2026 ("não localizei onde eu vejo os ajustes que foram feitos")."""
     rows = session.execute(text("""
-        select a.id, a.nf_item_id, ni.nf_numero, a.campo, a.valor_anterior, a.valor_novo,
-               a.editado_por_email, a.editado_em
+        select a.id, a.nf_item_id, ni.nf_numero, ni.produto_codigo, a.campo, a.valor_anterior,
+               a.valor_novo, a.editado_por_email, a.editado_em
         from auditoria_edicoes_planilha a
         left join notas_fiscais_itens ni on ni.id = a.nf_item_id
         where a.competencia_id = :cid and a.tipo_operacao = :tipo
@@ -211,7 +211,7 @@ def carregar_historico_edicoes(session, competencia_id, tipo_operacao, limite=20
         limit :limite
     """), {"cid": competencia_id, "tipo": tipo_operacao, "limite": limite}).mappings().all()
     return pd.DataFrame(rows, columns=[
-        "id", "nf_item_id", "nf_numero", "campo", "valor_anterior", "valor_novo",
+        "id", "nf_item_id", "nf_numero", "produto_codigo", "campo", "valor_anterior", "valor_novo",
         "editado_por_email", "editado_em",
     ])
 

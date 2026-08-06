@@ -192,11 +192,12 @@ def _aba_planilha(tipo_operacao, titulo):
         else:
             st.dataframe(
                 hist, use_container_width=True, height=300,
-                column_order=["nf_item_id", "nf_numero", "campo", "valor_anterior", "valor_novo",
-                              "editado_por_email", "editado_em"],
+                column_order=["nf_item_id", "nf_numero", "produto_codigo", "campo", "valor_anterior",
+                              "valor_novo", "editado_por_email", "editado_em"],
                 column_config={
                     "nf_item_id": st.column_config.NumberColumn("ID Item"),
                     "nf_numero": st.column_config.TextColumn("NF"),
+                    "produto_codigo": st.column_config.TextColumn("Código Produto"),
                     "campo": st.column_config.TextColumn("Campo alterado"),
                     "valor_anterior": st.column_config.TextColumn("Valor anterior"),
                     "valor_novo": st.column_config.TextColumn("Valor novo"),
