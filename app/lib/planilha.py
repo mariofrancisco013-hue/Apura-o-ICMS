@@ -32,11 +32,17 @@ _LABELS_INCONSISTENCIA = {
 
 
 def _formatar_inconsistencia(tipos_raw):
-    """`tipos_raw` vem de um string_agg(distinct tipo, ',') do SQL — None/'' quando o item não tem
-    inconsistência pendente."""
-    if not tipos_raw:
+    """`tipos_raw` vem de um string_agg(distinct tipo, ',') do SQL — NULL quando o item não tem
+    inconsistência pendente.
+
+    Achado em 06/08/2026: usar `if not tipos_raw` pra detectar "vazio" quebrava em produção — o pandas
+    (3.0) converte o NULL/None dessa coluna pra NaN (float) ao montar o DataFrame, e `NaN` é "verdadeiro"
+    em Python (bool(float('nan')) é True), então o `if not` deixava passar e o `.split()` de um float
+    estourava AttributeError. `pd.isna()` reconhece None, NaN e pd.NA igual, então é a checagem certa
+    aqui."""
+    if pd.isna(tipos_raw):
         return None
-    labels = [_LABELS_INCONSISTENCIA.get(t, t) for t in tipos_raw.split(",")]
+    labels = [_LABELS_INCONSISTENCIA.get(t, t) for t in str(tipos_raw).split(",")]
     return "⚠️ " + "; ".join(labels)
 
 
