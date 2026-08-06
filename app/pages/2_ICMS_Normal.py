@@ -10,6 +10,7 @@ from lib.planilha import (
     carregar_itens, salvar_itens_editados, resumo_por_cfop, carregar_totalizador,
     carregar_checkpoint_1024_editavel, salvar_checkpoint_1024_bulk,
     carregar_checkpoint_1025_editavel, salvar_checkpoint_1025_bulk, LABELS_INCONSISTENCIA,
+    carregar_historico_edicoes,
 )
 from lib.calculo_icms_normal import calcular_apuracao_icms_normal, salvar_apuracao
 from lib.validacoes import gerar_inconsistencias_ncm, gerar_inconsistencias_transferencia
@@ -70,7 +71,10 @@ def _formatar_moeda_df(df, colunas):
 def _aba_planilha(tipo_operacao, titulo):
     st.caption(
         "Ajuste diretamente na grade (igual planilha) se algum CFOP, NCM ou valor estiver errado no "
-        "relatório original. As mudanças só valem para esta competência e não alteram o arquivo .xls."
+        "relatório original. As mudanças só valem para esta competência e não alteram o arquivo .xls. Ao "
+        "salvar, as ⚠️ Inconsistências desta competência são recalculadas na hora — se o ajuste corrigiu o "
+        "problema, o alerta some sozinho, sem precisar ir na aba Apuração clicar em 'Calcular apuração' de "
+        "novo (mas os VALORES da apuração, linhas 01-14, aí sim só atualizam quando você clicar lá)."
     )
 
     visao = st.radio(
@@ -165,12 +169,41 @@ def _aba_planilha(tipo_operacao, titulo):
             },
         )
         if st.button("💾 Salvar alterações", key=f"salvar_{tipo_operacao}"):
-            n = salvar_itens_editados(session, df, editado)
+            n = salvar_itens_editados(session, df, editado, competencia_id=cid, tipo_operacao=tipo_operacao,
+                                       usuario=usuario_atual())
             if n:
-                st.success(f"{n} linha(s) atualizada(s).")
+                with st.spinner("Recalculando inconsistências..."):
+                    n_ncm = gerar_inconsistencias_ncm(session, cid, empresa_id)
+                    n_transf = gerar_inconsistencias_transferencia(session, cid, empresa_id)
+                    n_ncm_trib = gerar_inconsistencias_ncm_tributado(session, cid, empresa_id)
+                st.success(
+                    f"{n} linha(s) atualizada(s). Inconsistências recalculadas: {n_ncm} de NCM×ST, "
+                    f"{n_transf} de transferência, {n_ncm_trib} de NCM tributado — o que foi corrigido já "
+                    f"some da aba ⚠️ Inconsistências e da coluna de alerta aqui na grade."
+                )
             else:
                 st.info("Nenhuma mudança detectada.")
             st.rerun()
+
+    with st.expander("📝 Histórico de ajustes manuais desta planilha (mais recentes primeiro)"):
+        hist = carregar_historico_edicoes(session, cid, tipo_operacao)
+        if hist.empty:
+            st.caption("Nenhum ajuste manual registrado ainda nesta planilha, para esta competência.")
+        else:
+            st.dataframe(
+                hist, use_container_width=True, height=300,
+                column_order=["nf_item_id", "nf_numero", "campo", "valor_anterior", "valor_novo",
+                              "editado_por_email", "editado_em"],
+                column_config={
+                    "nf_item_id": st.column_config.NumberColumn("ID Item"),
+                    "nf_numero": st.column_config.TextColumn("NF"),
+                    "campo": st.column_config.TextColumn("Campo alterado"),
+                    "valor_anterior": st.column_config.TextColumn("Valor anterior"),
+                    "valor_novo": st.column_config.TextColumn("Valor novo"),
+                    "editado_por_email": st.column_config.TextColumn("Editado por"),
+                    "editado_em": st.column_config.DatetimeColumn("Quando", format="DD/MM/YYYY HH:mm"),
+                },
+            )
 
     st.markdown("---")
     st.subheader("Resumo por CFOP")

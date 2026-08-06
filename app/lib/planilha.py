@@ -139,9 +139,16 @@ def _para_tipo_nativo(v):
     return v
 
 
-def salvar_itens_editados(session, df_original, df_editado):
+def salvar_itens_editados(session, df_original, df_editado, competencia_id=None, tipo_operacao=None,
+                           usuario=None):
     """Compara linha a linha (pela coluna id) e só grava no banco o que realmente mudou. Retorna quantas
-    linhas foram atualizadas."""
+    linhas foram atualizadas.
+
+    Também grava um histórico em `auditoria_edicoes_planilha` (uma linha por CAMPO alterado, com o valor
+    de antes/depois, quem editou e quando) — pedido do usuário em 06/08/2026 ("não localizei onde eu vejo
+    os ajustes que foram feitos"). `competencia_id`/`tipo_operacao`/`usuario` são opcionais só pra não
+    quebrar chamadas antigas sem esses dados; a página sempre passa os três, então na prática a auditoria
+    é sempre gravada."""
     if df_original.empty:
         return 0
     orig = df_original.set_index("id")
@@ -149,6 +156,7 @@ def salvar_itens_editados(session, df_original, df_editado):
     campos = [c for c in COLUNAS_EDITAVEIS_ENTRADA if c != "id"]
 
     atualizados = 0
+    auditoria = []
     for item_id in orig.index:
         if item_id not in edit.index:
             continue  # linha apagada na grade — não propaga exclusão aqui, por segurança
@@ -160,6 +168,16 @@ def salvar_itens_editados(session, df_original, df_editado):
                 continue
             if v_orig != v_edit:
                 mudou = True
+                auditoria.append({
+                    "nf_item_id": _para_tipo_nativo(item_id),
+                    "competencia_id": competencia_id,
+                    "tipo_operacao": tipo_operacao,
+                    "campo": campo,
+                    "valor_anterior": None if pd.isna(v_orig) else str(v_orig),
+                    "valor_novo": None if pd.isna(v_edit) else str(v_edit),
+                    "editado_por": (usuario or {}).get("id"),
+                    "editado_por_email": (usuario or {}).get("email"),
+                })
             valores[campo] = None if pd.isna(v_edit) else _para_tipo_nativo(v_edit)
         if mudou:
             session.execute(text("""
@@ -172,8 +190,30 @@ def salvar_itens_editados(session, df_original, df_editado):
             """), {**valores, "id": _para_tipo_nativo(item_id)})
             atualizados += 1
     if atualizados:
+        if auditoria and competencia_id is not None and tipo_operacao is not None:
+            pd.DataFrame(auditoria).to_sql(
+                "auditoria_edicoes_planilha", session.bind, if_exists="append", index=False
+            )
         session.commit()
     return atualizados
+
+
+def carregar_historico_edicoes(session, competencia_id, tipo_operacao, limite=200):
+    """Lista os ajustes manuais feitos na grade desta competência/tipo_operacao, mais recentes primeiro —
+    pedido do usuário em 06/08/2026 ("não localizei onde eu vejo os ajustes que foram feitos")."""
+    rows = session.execute(text("""
+        select a.id, a.nf_item_id, ni.nf_numero, a.campo, a.valor_anterior, a.valor_novo,
+               a.editado_por_email, a.editado_em
+        from auditoria_edicoes_planilha a
+        left join notas_fiscais_itens ni on ni.id = a.nf_item_id
+        where a.competencia_id = :cid and a.tipo_operacao = :tipo
+        order by a.editado_em desc
+        limit :limite
+    """), {"cid": competencia_id, "tipo": tipo_operacao, "limite": limite}).mappings().all()
+    return pd.DataFrame(rows, columns=[
+        "id", "nf_item_id", "nf_numero", "campo", "valor_anterior", "valor_novo",
+        "editado_por_email", "editado_em",
+    ])
 
 
 def resumo_por_cfop(session, competencia_id, tipo_operacao):
