@@ -4,22 +4,17 @@
 -- Confirmado com o usuário: no relatório Winthor a coluna "Produto" vem numa célula só, no formato
 -- "<código> - <descrição>" (ex: "000123 - TESOURA FUTURO"). A tabela `produto` (raw, célula inteira) é
 -- mantida como estava, sem quebrar nada que já dependia dela — as duas colunas novas são derivadas dela.
+--
+-- IMPORTANTE (06/08/2026): esta versão só faz ALTER TABLE + índice + comentários — tudo metadado, roda em
+-- menos de 1 segundo. O backfill dos ~47 mil itens já importados (que precisa reescrever cada linha) foi
+-- REMOVIDO daqui porque estourava o timeout do SQL Editor do Supabase ("upstream timeout" — é um limite do
+-- proxy do painel, não do Postgres em si). Depois de rodar este arquivo, rode
+-- `python scripts/backfill_produto_codigo.py` no seu computador (mesmo jeito do seed_ncm.py) para
+-- preencher produto_codigo/produto_descricao dos itens antigos — sem limite de tempo do painel.
 
 alter table notas_fiscais_itens
     add column if not exists produto_codigo text,
     add column if not exists produto_descricao text;
-
--- Backfill dos itens já importados: separa pelo primeiro " - ". Quando não há " - " na célula (formato
--- inesperado), joga o texto inteiro em produto_descricao e deixa produto_codigo em branco — mais seguro
--- que adivinhar errado onde termina o código.
-update notas_fiscais_itens
-set produto_codigo = trim(split_part(produto, ' - ', 1)),
-    produto_descricao = trim(substring(produto from strpos(produto, ' - ') + 3))
-where produto_codigo is null and produto ~ ' - ';
-
-update notas_fiscais_itens
-set produto_descricao = trim(produto)
-where produto_codigo is null and produto_descricao is null and produto is not null;
 
 create index if not exists ix_nfi_produto_codigo on notas_fiscais_itens(produto_codigo);
 

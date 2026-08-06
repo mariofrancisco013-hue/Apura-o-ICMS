@@ -16,7 +16,24 @@ Validações cruzadas (geram registros em `inconsistencias` para a equipe revisa
    traga o CNPJ para tornar isso exato.
 """
 import re
+import pandas as pd
 from sqlalchemy import text
+
+# Colunas de `inconsistencias` que estas validações preenchem — o resto (status, created_at etc.) usa o
+# default da tabela. Usado pelo bulk insert via pandas.to_sql (ver _inserir_bulk).
+_COLS_INCONSISTENCIA = ["competencia_id", "tipo", "ncm", "cfop", "nf_item_id", "descricao"]
+
+
+def _inserir_bulk(session, linhas: list[dict]) -> int:
+    """Insere em lote via to_sql (mesma técnica de app/lib/importacao.py) em vez de um INSERT por linha —
+    achado em 06/08/2026: gerar as inconsistências item a item, com um INSERT síncrono por linha, deixava
+    "Calcular apuração" visivelmente lento em relatórios grandes (dezenas de milhares de itens de Saída),
+    pelo mesmo motivo já corrigido na importação em 05/08 (muitas idas e voltas ao banco)."""
+    if not linhas:
+        return 0
+    df = pd.DataFrame(linhas, columns=_COLS_INCONSISTENCIA)
+    df.to_sql("inconsistencias", session.bind, if_exists="append", index=False, method="multi", chunksize=500)
+    return len(df)
 
 
 def _normaliza_nome(s: str) -> str:
@@ -38,6 +55,7 @@ def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
     session.execute(text("""
         delete from inconsistencias where competencia_id = :cid and tipo = 'ncm_st_inconsistente'
     """), {"cid": competencia_id})
+    session.commit()  # fecha a transação do delete antes do bulk insert (que usa outra conexão do pool)
 
     rows = session.execute(text("""
         select ni.tipo_operacao, ni.ncm, ni.id, ce.is_st
@@ -56,7 +74,7 @@ def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
         alvo[r["ncm"]].add(bool(r["is_st"]))
         exemplo_item.setdefault((r["tipo_operacao"], r["ncm"]), r["id"])
 
-    gerados = 0
+    a_inserir = []
     ncms = set(entrada_st) & set(saida_st)
     for ncm in ncms:
         e_st, s_st = entrada_st[ncm], saida_st[ncm]
@@ -69,17 +87,12 @@ def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
                 f"NCM {ncm}: entrou como {entrada_regime} mas saiu como {saida_regime} — "
                 f"tratamento de substituição tributária inconsistente entre Entrada e Saída."
             )
-            session.execute(text("""
-                insert into inconsistencias (competencia_id, tipo, ncm, nf_item_id, descricao)
-                values (:cid, 'ncm_st_inconsistente', :ncm, :item_id, :descricao)
-            """), {
-                "cid": competencia_id, "ncm": ncm,
-                "item_id": exemplo_item.get(("entrada", ncm)) or exemplo_item.get(("saida", ncm)),
+            a_inserir.append({
+                "competencia_id": competencia_id, "tipo": "ncm_st_inconsistente", "ncm": ncm,
+                "cfop": None, "nf_item_id": exemplo_item.get(("entrada", ncm)) or exemplo_item.get(("saida", ncm)),
                 "descricao": descricao,
             })
-            gerados += 1
-    session.commit()
-    return gerados
+    return _inserir_bulk(session, a_inserir)
 
 
 def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
@@ -90,6 +103,7 @@ def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
     session.execute(text("""
         delete from inconsistencias where competencia_id = :cid and tipo = 'transferencia_nao_vinculada'
     """), {"cid": competencia_id})
+    session.commit()  # fecha a transação do delete antes do bulk insert (que usa outra conexão do pool)
 
     empresas = session.execute(text("select razao_social from empresas")).scalars().all()
     nomes_grupo = [_normaliza_nome(e) for e in empresas]
@@ -101,7 +115,7 @@ def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
         where ni.competencia_id = :cid and ce.is_transferencia = true
     """), {"cid": competencia_id}).mappings().all()
 
-    gerados = 0
+    a_inserir = []
     for it in itens:
         nome_parceiro = _normaliza_nome(it["parceiro"])
         match = any(
@@ -114,10 +128,8 @@ def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
                 f"não corresponde por nome a nenhuma empresa cadastrada do grupo. HEURÍSTICA POR NOME — "
                 f"o relatório de origem não traz o CNPJ do parceiro, confirme manualmente antes de agir."
             )
-            session.execute(text("""
-                insert into inconsistencias (competencia_id, tipo, cfop, nf_item_id, descricao)
-                values (:cid, 'transferencia_nao_vinculada', :cfop, :item_id, :descricao)
-            """), {"cid": competencia_id, "cfop": it["cfop"], "item_id": it["id"], "descricao": descricao})
-            gerados += 1
-    session.commit()
-    return gerados
+            a_inserir.append({
+                "competencia_id": competencia_id, "tipo": "transferencia_nao_vinculada", "ncm": None,
+                "cfop": it["cfop"], "nf_item_id": it["id"], "descricao": descricao,
+            })
+    return _inserir_bulk(session, a_inserir)

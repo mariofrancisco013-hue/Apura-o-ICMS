@@ -66,6 +66,7 @@ def gerar_inconsistencias_ncm_tributado(session, competencia_id: int, empresa_id
         delete from inconsistencias where competencia_id = :cid
         and tipo in ('ncm_tributado_como_st', 'ncm_tributado_novo')
     """), {"cid": competencia_id})
+    session.commit()  # fecha a transação do delete antes do bulk insert (que usa outra conexão do pool)
 
     itens = session.execute(text("""
         select ni.id, ni.ncm, ni.cfop, ce.is_st
@@ -74,7 +75,11 @@ def gerar_inconsistencias_ncm_tributado(session, competencia_id: int, empresa_id
         where ni.competencia_id = :cid and ni.ncm is not null and ce.is_transferencia = false
     """), {"cid": competencia_id}).mappings().all()
 
-    gerados = 0
+    # Monta a lista em memória (Python puro, sem ida ao banco) e insere tudo de uma vez no fim — achado em
+    # 06/08/2026: com um INSERT síncrono por item classificado, "Calcular apuração" ficava lento em
+    # relatórios de Saída com dezenas de milhares de linhas (mesmo problema já corrigido na importação em
+    # 05/08, só que essa validação, adicionada depois, tinha ficado de fora daquela correção).
+    a_inserir = []
     ja_sinalizado_novo = set()  # um NCM "novo" só gera 1 inconsistência por competência, mesmo em várias NFs
     for it in itens:
         ncm = it["ncm"]
@@ -85,12 +90,10 @@ def gerar_inconsistencias_ncm_tributado(session, competencia_id: int, empresa_id
                     f"CFOP {it['cfop']}, classificado como ST. Confira se o CFOP do lançamento está certo "
                     f"ou se este produto mudou de regime tributário."
                 )
-                session.execute(text("""
-                    insert into inconsistencias (competencia_id, tipo, ncm, cfop, nf_item_id, descricao)
-                    values (:cid, 'ncm_tributado_como_st', :ncm, :cfop, :item_id, :descricao)
-                """), {"cid": competencia_id, "ncm": ncm, "cfop": it["cfop"], "item_id": it["id"],
-                       "descricao": descricao})
-                gerados += 1
+                a_inserir.append({
+                    "competencia_id": competencia_id, "tipo": "ncm_tributado_como_st", "ncm": ncm,
+                    "cfop": it["cfop"], "nf_item_id": it["id"], "descricao": descricao,
+                })
         elif not it["is_st"] and ncm not in ja_sinalizado_novo:
             ja_sinalizado_novo.add(ncm)
             descricao = (
@@ -98,11 +101,15 @@ def gerar_inconsistencias_ncm_tributado(session, competencia_id: int, empresa_id
                 f"cadastrado na lista de NCMs tributados desta empresa. Confirme se deve ser incluído — "
                 f"aba 'NCMs Tributados' em ICMS Normal."
             )
-            session.execute(text("""
-                insert into inconsistencias (competencia_id, tipo, ncm, cfop, nf_item_id, descricao)
-                values (:cid, 'ncm_tributado_novo', :ncm, :cfop, :item_id, :descricao)
-            """), {"cid": competencia_id, "ncm": ncm, "cfop": it["cfop"], "item_id": it["id"],
-                   "descricao": descricao})
-            gerados += 1
-    session.commit()
-    return gerados
+            a_inserir.append({
+                "competencia_id": competencia_id, "tipo": "ncm_tributado_novo", "ncm": ncm,
+                "cfop": it["cfop"], "nf_item_id": it["id"], "descricao": descricao,
+            })
+
+    if not a_inserir:
+        return 0
+    df = pd.DataFrame(a_inserir, columns=[
+        "competencia_id", "tipo", "ncm", "cfop", "nf_item_id", "descricao",
+    ])
+    df.to_sql("inconsistencias", session.bind, if_exists="append", index=False, method="multi", chunksize=500)
+    return len(df)
