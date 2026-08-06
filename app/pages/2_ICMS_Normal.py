@@ -18,6 +18,7 @@ from lib.ncm_tributado import (
 )
 from lib.importar_1024 import parse_rotina_1024
 from lib.formatacao import formatar_moeda, coluna_moeda
+from lib.status_apuracao import status_competencia
 from sqlalchemy import text
 
 st.set_page_config(page_title="ICMS Normal", layout="wide")
@@ -44,9 +45,12 @@ comp = st.selectbox(
 cid = comp["id"]
 empresa_id = comp["empresa_id"]
 
-aba_entrada, aba_saida, aba_ncm, aba_ajustes, aba_apuracao = st.tabs([
+_status = status_competencia(session, cid, comp["status"])
+{"success": st.success, "warning": st.warning, "info": st.info}[_status["nivel"]](_status["texto"])
+
+aba_entrada, aba_saida, aba_ncm, aba_ajustes, aba_apuracao, aba_inconsistencias = st.tabs([
     "📥 Planilha de Entrada", "📤 Planilha de Saída", "🔖 NCMs Tributados",
-    "🧮 Ajustes na Apuração", "📋 Apuração",
+    "🧮 Ajustes na Apuração", "📋 Apuração", "⚠️ Inconsistências",
 ])
 
 
@@ -193,7 +197,7 @@ with aba_ncm:
         "novo para você confirmar se deve entrar na lista."
     )
     st.caption(
-        "Essas sinalizações aparecem na página **Inconsistências** (tipos 'ncm_tributado_como_st' e "
+        "Essas sinalizações aparecem na aba **⚠️ Inconsistências**, aqui mesmo (tipos 'ncm_tributado_como_st' e "
         "'ncm_tributado_novo')."
     )
 
@@ -285,7 +289,7 @@ with aba_apuracao:
             session.commit()
         st.success(
             f"Calculado. {n_ncm} inconsistência(s) de NCM x ST, {n_transf} de transferência e "
-            f"{n_ncm_trib} de NCM tributado geradas — veja a página **Inconsistências**."
+            f"{n_ncm_trib} de NCM tributado geradas — veja a aba **⚠️ Inconsistências** aqui do lado."
         )
         st.rerun()
 
@@ -353,3 +357,48 @@ with aba_apuracao:
                 )
             elif ref_editado["valor_1025"].notna().any():
                 st.success("Apuração bate com a Rotina 1025.")
+
+with aba_inconsistencias:
+    st.caption(
+        "NCM x ST: mesmo NCM tratado de forma diferente entre Entrada e Saída. Transferência não "
+        "vinculada: CFOP de transferência cujo parceiro não bate por nome com nenhuma empresa do grupo "
+        "cadastrada (heurística — o relatório de origem não traz o CNPJ do parceiro, confirme "
+        "manualmente). NCM tributado como ST: um NCM cadastrado como 'tributado' na aba NCMs Tributados "
+        "apareceu num item classificado como ST. NCM tributado novo: um NCM ainda não cadastrado apareceu "
+        "como tributado (não-ST) — candidato a entrar na lista. Geradas ao clicar em 'Calcular apuração' "
+        "na aba Apuração."
+    )
+
+    TIPOS_INCONSISTENCIA = [
+        "ncm_st_inconsistente", "transferencia_nao_vinculada", "ncm_tributado_como_st", "ncm_tributado_novo",
+    ]
+    c_status, c_tipo = st.columns(2)
+    status_filtro = c_status.multiselect("Status", ["pendente", "revisado", "ignorado"],
+                                          default=["pendente"], key="inc_status")
+    tipo_filtro = c_tipo.multiselect("Tipo", TIPOS_INCONSISTENCIA, default=TIPOS_INCONSISTENCIA, key="inc_tipo")
+
+    if status_filtro and tipo_filtro:
+        itens_inc = session.execute(text("""
+            select id, tipo, ncm, cfop, descricao, status, revisado_por, revisado_em
+            from inconsistencias
+            where competencia_id = :cid and status = any(:status) and tipo = any(:tipo)
+            order by created_at desc
+        """), {"cid": cid, "status": status_filtro, "tipo": tipo_filtro}).mappings().all()
+
+        st.write(f"{len(itens_inc)} inconsistência(s) encontrada(s).")
+        for item in itens_inc:
+            with st.expander(f"[{item['tipo']}] {item['descricao'][:100]}..."):
+                st.write(item["descricao"])
+                c1, c2, _ = st.columns(3)
+                if c1.button("Marcar como revisado", key=f"rev_{item['id']}"):
+                    session.execute(text("""
+                        update inconsistencias set status='revisado', revisado_em=now() where id=:id
+                    """), {"id": item["id"]})
+                    session.commit()
+                    st.rerun()
+                if c2.button("Ignorar", key=f"ign_{item['id']}"):
+                    session.execute(text("""
+                        update inconsistencias set status='ignorado', revisado_em=now() where id=:id
+                    """), {"id": item["id"]})
+                    session.commit()
+                    st.rerun()

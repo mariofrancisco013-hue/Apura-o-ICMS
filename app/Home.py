@@ -1,6 +1,7 @@
 import streamlit as st
 from lib.auth import require_login, logout_button
 from lib.db import get_session
+from lib.status_apuracao import classificar_status
 from sqlalchemy import text
 
 st.set_page_config(page_title="Apuração ICMS", layout="wide")
@@ -24,12 +25,20 @@ if not resumo:
     st.info("Nenhuma competência importada ainda. Use a página **Importar Relatórios** no menu à esquerda.")
 else:
     st.subheader("Competências")
-    st.dataframe(resumo, use_container_width=True)
+    linhas = []
+    for r in resumo:
+        r = dict(r)
+        r["situação"] = classificar_status(r["status"], r["n_pendentes"])["texto"]
+        linhas.append(r)
+    st.dataframe(
+        linhas, use_container_width=True,
+        column_order=["razao_social", "ano", "mes", "status", "situação", "n_itens", "n_pendentes"],
+    )
 
 st.markdown("---")
 st.markdown(
     "Use o menu à esquerda: **Importar Relatórios** (Entrada/Saída), **ICMS Normal** (planilhas de "
-    "Entrada/Saída editáveis, ajustes da apuração, e a apuração final espelhando a Rotina 1025), "
-    "**Empresas** (cadastro do grupo), **CFOP** (tabela de referência e exceções) e **Inconsistências** "
-    "(revisão das validações cruzadas de NCM e transferência)."
+    "Entrada/Saída editáveis, NCMs tributados, ajustes da apuração, a apuração final espelhando a Rotina "
+    "1025, e a revisão de inconsistências — tudo em abas dentro dessa página), **Empresas** (cadastro do "
+    "grupo) e **CFOP** (tabela de referência e exceções)."
 )

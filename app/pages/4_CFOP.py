@@ -36,7 +36,7 @@ with st.expander("O que cada coluna significa", expanded=True):
         "- **Transferência?** — marca se o CFOP é usado para transferência de mercadoria entre "
         "empresas do grupo (ex: 5.409, 6.409). Itens com esse CFOP são comparados contra o cadastro "
         "de Empresas: se as duas partes não forem vinculadas (mesma raiz de CNPJ), o sistema sinaliza "
-        "na página Inconsistências.\n"
+        "na aba Inconsistências, dentro de ICMS Normal.\n"
         "- **Regra especial** — anotação livre para casos fora do padrão. Exemplo já registrado: o "
         "CFOP 5927 tem destaque de ICMS que parece 'errado' à primeira vista, mas é válido porque o "
         "estorno do crédito correspondente acontece em outro lançamento — sem essa nota, alguém "
