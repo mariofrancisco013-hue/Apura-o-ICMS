@@ -96,23 +96,52 @@ def resumo_por_cfop(session, competencia_id, tipo_operacao):
     return pd.DataFrame(rows, columns=["cfop", "descricao", "n", "base", "icms"])
 
 
-def carregar_checkpoint_1024_editavel(session, competencia_id):
-    """Uma linha por CFOP (de Entrada+Saída), com o calculado ao lado do valor de referência já salvo
-    (se houver) — para editar tudo de uma vez numa grade, em vez de formulário CFOP por CFOP."""
+# Faixa de CFOP por direção (padrão nacional): 1xxx/2xxx/3xxx = Entrada, 5xxx/6xxx/7xxx = Saída. Usado só
+# para decidir em qual aba (Entrada/Saída) cada CFOP da Rotina 1024 aparece — não depende de o CFOP ter
+# sido efetivamente importado num relatório de NF (ver nota abaixo).
+_FAIXA_CFOP = {"entrada": (1, 2, 3), "saida": (5, 6, 7)}
+
+
+def carregar_checkpoint_1024_editavel(session, competencia_id, tipo_operacao):
+    """Uma linha por CFOP, com o calculado (a partir dos itens importados) ao lado do valor de referência
+    da Rotina 1024 (se houver) — para editar tudo de uma vez numa grade, em vez de formulário CFOP por
+    CFOP.
+
+    Traz TODO CFOP que aparecer OU no calculado OU na Rotina 1024 (união, não interseção) — achado em
+    06/08/2026: alguns CFOPs da Rotina 1024 (ex: 1353, 1407, 1933, 2353 na Sodine) não vêm em NENHUM
+    relatório de Entrada/Saída importado, porque são lançados direto no sistema contábil (mesmo caso já
+    conhecido do CFOP 1602). A versão anterior só mostrava CFOPs que já existiam no calculado, então esses
+    ficavam invisíveis na conferência mesmo aparecendo na Rotina 1024 (com valor zerado, nesses casos —
+    mas o usuário não tinha como confirmar isso olhando só a grade)."""
+    faixa = _FAIXA_CFOP[tipo_operacao]
     rows = session.execute(text("""
         with calc as (
             select cfop, sum(base_icms) as base_calc, sum(valor_icms) as icms_calc
             from notas_fiscais_itens where competencia_id = :cid group by cfop
+        ),
+        ref as (
+            select cfop, valor_base, valor_icms
+            from checkpoints_referencia where competencia_id = :cid and fonte = 'rotina_1024'
+        ),
+        todos_cfops as (
+            select cfop from calc
+            union
+            select cfop from ref
         )
-        select c.cfop, cf.descricao, c.base_calc, c.icms_calc,
+        select t.cfop, cf.descricao,
+               coalesce(c.base_calc, 0) as base_calc, coalesce(c.icms_calc, 0) as icms_calc,
                r.valor_base as base_1024, r.valor_icms as icms_1024
-        from calc c
-        join cfop cf on cf.codigo = c.cfop
-        left join checkpoints_referencia r
-            on r.competencia_id = :cid and r.fonte = 'rotina_1024' and r.cfop = c.cfop
-        order by c.cfop
+        from todos_cfops t
+        left join calc c on c.cfop = t.cfop
+        left join ref r on r.cfop = t.cfop
+        left join cfop cf on cf.codigo = t.cfop
+        order by t.cfop
     """), {"cid": competencia_id}).mappings().all()
-    return pd.DataFrame(rows, columns=["cfop", "descricao", "base_calc", "icms_calc", "base_1024", "icms_1024"])
+    df = pd.DataFrame(rows, columns=["cfop", "descricao", "base_calc", "icms_calc", "base_1024", "icms_1024"])
+    if df.empty:
+        return df
+    df["descricao"] = df["descricao"].fillna("(CFOP não cadastrado na tabela de referência)")
+    return df[df["cfop"].apply(lambda c: (c // 1000) in faixa)].reset_index(drop=True)
 
 
 def salvar_checkpoint_1024_bulk(session, competencia_id, df):

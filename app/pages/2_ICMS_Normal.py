@@ -13,6 +13,7 @@ from lib.planilha import (
 )
 from lib.calculo_icms_normal import calcular_apuracao_icms_normal, salvar_apuracao
 from lib.validacoes import gerar_inconsistencias_ncm, gerar_inconsistencias_transferencia
+from lib.importar_1024 import parse_rotina_1024
 from sqlalchemy import text
 
 st.set_page_config(page_title="ICMS Normal", layout="wide")
@@ -84,12 +85,30 @@ def _aba_planilha(tipo_operacao, titulo):
     st.markdown("---")
     with st.expander(f"📎 Conferência com a Rotina 1024 ({'Entrada' if tipo_operacao=='entrada' else 'Saída'})"):
         st.caption(
-            "Preencha as colunas 'base_1024' e 'icms_1024' com os valores da Rotina 1024 (RAICMS) para "
-            "cada CFOP — dá para colar direto de uma planilha/PDF. As colunas 'diff' mostram a diferença "
-            "contra o que foi calculado a partir do relatório importado."
+            "Anexe o PDF da Rotina 1024 (Livro RAICMS Modelo P9) e clique em Importar — preenche as "
+            "colunas 'base_1024'/'icms_1024' de todos os CFOPs automaticamente, sem digitar. Se preferir, "
+            "também dá para editar/colar valor a valor direto na grade abaixo. Mostra TODO CFOP que "
+            "aparecer no relatório importado OU na Rotina 1024, mesmo que só num dos dois — é assim que "
+            "aparecem CFOPs como o 1602 (lançado direto no sistema contábil, sem passar por nota fiscal)."
         )
-        ref = carregar_checkpoint_1024_editavel(session, cid)
-        ref = ref[ref["cfop"].isin(resumo["cfop"])] if not resumo.empty else ref
+        c_up1, c_up2 = st.columns([3, 1])
+        pdf_1024 = c_up1.file_uploader(
+            "PDF da Rotina 1024", type=["pdf"], key=f"upload_1024_{tipo_operacao}",
+            label_visibility="collapsed",
+        )
+        if c_up2.button("📥 Importar do PDF", key=f"importar_1024_{tipo_operacao}", disabled=pdf_1024 is None):
+            try:
+                linhas_1024 = parse_rotina_1024(pdf_1024)
+                df_1024 = pd.DataFrame(linhas_1024).rename(
+                    columns={"valor_base": "base_1024", "valor_icms": "icms_1024"}
+                )
+                n = salvar_checkpoint_1024_bulk(session, cid, df_1024)
+                st.success(f"{n} CFOP(s) importado(s) do PDF da Rotina 1024 (Entrada + Saída juntas).")
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+        ref = carregar_checkpoint_1024_editavel(session, cid, tipo_operacao)
         ref_editado = st.data_editor(
             ref, use_container_width=True, key=f"checkpoint1024_{tipo_operacao}",
             column_config={
