@@ -14,7 +14,10 @@ st.title("Inconsistências")
 st.caption(
     "NCM x ST: mesmo NCM tratado de forma diferente entre Entrada e Saída. Transferência não vinculada: "
     "CFOP de transferência cujo parceiro não bate por nome com nenhuma empresa do grupo cadastrada "
-    "(heurística — o relatório de origem não traz o CNPJ do parceiro, confirme manualmente)."
+    "(heurística — o relatório de origem não traz o CNPJ do parceiro, confirme manualmente). NCM "
+    "tributado como ST: um NCM cadastrado como 'tributado' na aba NCMs Tributados (ICMS Normal) apareceu "
+    "num item classificado como ST. NCM tributado novo: um NCM ainda não cadastrado apareceu como "
+    "tributado (não-ST) — candidato a entrar na lista."
 )
 
 session = get_session()
@@ -30,9 +33,9 @@ comp = st.selectbox("Competência", competencias,
                      format_func=lambda c: f"{c['razao_social']} — {c['mes']:02d}/{c['ano']}")
 cid = comp["id"]
 
+TIPOS = ["ncm_st_inconsistente", "transferencia_nao_vinculada", "ncm_tributado_como_st", "ncm_tributado_novo"]
 status_filtro = st.multiselect("Status", ["pendente", "revisado", "ignorado"], default=["pendente"])
-tipo_filtro = st.multiselect("Tipo", ["ncm_st_inconsistente", "transferencia_nao_vinculada"],
-                              default=["ncm_st_inconsistente", "transferencia_nao_vinculada"])
+tipo_filtro = st.multiselect("Tipo", TIPOS, default=TIPOS)
 
 if not status_filtro or not tipo_filtro:
     st.stop()

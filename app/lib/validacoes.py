@@ -30,7 +30,14 @@ def _normaliza_nome(s: str) -> str:
 def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
     """Compara, por NCM, o conjunto de classificações ST usadas na Entrada vs na Saída (ignorando itens de
     transferência, que têm regra própria). Gera uma inconsistência por NCM cujo tratamento diverge entre os
-    dois lados. Retorna a quantidade de inconsistências geradas."""
+    dois lados. Retorna a quantidade de inconsistências geradas.
+
+    Limpa as inconsistências deste tipo geradas numa rodada anterior desta competência antes de inserir de
+    novo — sem isso, clicar em "Calcular apuração" mais de uma vez duplicava as mesmas inconsistências
+    (achado em 06/08/2026, junto com a correção equivalente em gerar_inconsistencias_transferencia)."""
+    session.execute(text("""
+        delete from inconsistencias where competencia_id = :cid and tipo = 'ncm_st_inconsistente'
+    """), {"cid": competencia_id})
 
     rows = session.execute(text("""
         select ni.tipo_operacao, ni.ncm, ni.id, ce.is_st
@@ -78,7 +85,11 @@ def gerar_inconsistencias_ncm(session, competencia_id: int) -> int:
 def gerar_inconsistencias_transferencia(session, competencia_id: int) -> int:
     """Heurística por nome (ver limitação no docstring do módulo) — todo item de transferência cujo
     parceiro não corresponde por nome a nenhuma empresa cadastrada do grupo é sinalizado para revisão
-    manual."""
+    manual. Limpa as inconsistências deste tipo de uma rodada anterior antes de inserir de novo (mesmo
+    motivo do ajuste em gerar_inconsistencias_ncm)."""
+    session.execute(text("""
+        delete from inconsistencias where competencia_id = :cid and tipo = 'transferencia_nao_vinculada'
+    """), {"cid": competencia_id})
 
     empresas = session.execute(text("select razao_social from empresas")).scalars().all()
     nomes_grupo = [_normaliza_nome(e) for e in empresas]

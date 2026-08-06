@@ -13,7 +13,11 @@ from lib.planilha import (
 )
 from lib.calculo_icms_normal import calcular_apuracao_icms_normal, salvar_apuracao
 from lib.validacoes import gerar_inconsistencias_ncm, gerar_inconsistencias_transferencia
+from lib.ncm_tributado import (
+    listar_ncms_tributados, salvar_ncms_tributados, gerar_inconsistencias_ncm_tributado,
+)
 from lib.importar_1024 import parse_rotina_1024
+from lib.formatacao import formatar_moeda, coluna_moeda
 from sqlalchemy import text
 
 st.set_page_config(page_title="ICMS Normal", layout="wide")
@@ -23,7 +27,7 @@ st.title("ICMS Normal")
 
 session = get_session()
 competencias = session.execute(text("""
-    select c.id, e.razao_social, c.ano, c.mes, c.status
+    select c.id, e.id as empresa_id, e.razao_social, c.ano, c.mes, c.status
     from competencias c join empresas e on e.id = c.empresa_id
     where c.modulo = 'icms_normal'
     order by c.ano desc, c.mes desc
@@ -38,10 +42,25 @@ comp = st.selectbox(
     format_func=lambda c: f"{c['razao_social']} — {c['mes']:02d}/{c['ano']} ({c['status']})",
 )
 cid = comp["id"]
+empresa_id = comp["empresa_id"]
 
-aba_entrada, aba_saida, aba_ajustes, aba_apuracao = st.tabs(
-    ["📥 Planilha de Entrada", "📤 Planilha de Saída", "🧮 Ajustes na Apuração", "📋 Apuração"]
-)
+aba_entrada, aba_saida, aba_ncm, aba_ajustes, aba_apuracao = st.tabs([
+    "📥 Planilha de Entrada", "📤 Planilha de Saída", "🔖 NCMs Tributados",
+    "🧮 Ajustes na Apuração", "📋 Apuração",
+])
+
+
+def _formatar_moeda_df(df, colunas):
+    """Devolve uma cópia do DataFrame com as colunas indicadas formatadas como texto 'R$ 1.234,56' — só
+    para exibição (st.dataframe/st.table), nunca para grades editáveis (ali a coluna precisa continuar
+    numérica, ver lib/formatacao.py)."""
+    if df.empty:
+        return df
+    out = df.copy()
+    for c in colunas:
+        if c in out.columns:
+            out[c] = out[c].apply(formatar_moeda)
+    return out
 
 
 def _aba_planilha(tipo_operacao, titulo):
@@ -68,7 +87,12 @@ def _aba_planilha(tipo_operacao, titulo):
 
     editado = st.data_editor(
         df, use_container_width=True, height=420, num_rows="fixed", key=f"editor_{tipo_operacao}",
-        column_config={"id": st.column_config.NumberColumn("ID", disabled=True)},
+        column_config={
+            "id": st.column_config.NumberColumn("ID", disabled=True),
+            "valor_produto": coluna_moeda("Valor Produto"),
+            "base_icms": coluna_moeda("Base ICMS"),
+            "valor_icms": coluna_moeda("Valor ICMS"),
+        },
     )
     if st.button("💾 Salvar alterações", key=f"salvar_{tipo_operacao}"):
         n = salvar_itens_editados(session, df, editado)
@@ -80,7 +104,7 @@ def _aba_planilha(tipo_operacao, titulo):
 
     st.markdown("---")
     st.subheader("Resumo por CFOP")
-    st.dataframe(resumo, use_container_width=True)
+    st.dataframe(_formatar_moeda_df(resumo, ["base", "icms"]), use_container_width=True)
 
     st.markdown("---")
     with st.expander(f"📎 Conferência com a Rotina 1024 ({'Entrada' if tipo_operacao=='entrada' else 'Saída'})"):
@@ -114,10 +138,10 @@ def _aba_planilha(tipo_operacao, titulo):
             column_config={
                 "cfop": st.column_config.NumberColumn("CFOP", disabled=True),
                 "descricao": st.column_config.TextColumn("Descrição", disabled=True),
-                "base_calc": st.column_config.NumberColumn("Base (calculado)", disabled=True, format="%.2f"),
-                "icms_calc": st.column_config.NumberColumn("ICMS (calculado)", disabled=True, format="%.2f"),
-                "base_1024": st.column_config.NumberColumn("Base (Rotina 1024)", format="%.2f"),
-                "icms_1024": st.column_config.NumberColumn("ICMS (Rotina 1024)", format="%.2f"),
+                "base_calc": coluna_moeda("Base (calculado)", disabled=True),
+                "icms_calc": coluna_moeda("ICMS (calculado)", disabled=True),
+                "base_1024": coluna_moeda("Base (Rotina 1024)"),
+                "icms_1024": coluna_moeda("ICMS (Rotina 1024)"),
             },
         )
         if st.button("Salvar valores da Rotina 1024", key=f"salvar_1024_{tipo_operacao}"):
@@ -132,7 +156,11 @@ def _aba_planilha(tipo_operacao, titulo):
         divergentes = diffs[(diffs["diff_base"].abs() > 0.05) | (diffs["diff_icms"].abs() > 0.05)]
         if not divergentes.empty:
             st.warning(f"{len(divergentes)} CFOP(s) com diferença acima de R$ 0,05:")
-            st.dataframe(divergentes[["cfop", "descricao", "diff_base", "diff_icms"]], use_container_width=True)
+            st.dataframe(
+                _formatar_moeda_df(divergentes[["cfop", "descricao", "diff_base", "diff_icms"]],
+                                    ["diff_base", "diff_icms"]),
+                use_container_width=True,
+            )
         elif ref_editado["base_1024"].notna().any():
             st.success("Tudo bateu com os valores da Rotina 1024 informados.")
 
@@ -143,11 +171,52 @@ with aba_entrada:
 with aba_saida:
     _aba_planilha("saida", "Saída")
 
-with aba_ajustes:
+with aba_ncm:
+    st.markdown(
+        "**Para que serve esta aba:** cadastro dos NCMs que você sabe que são \"de fato tributados\" "
+        "(não-ST — geram crédito/débito pleno de ICMS), esperados nos CFOPs 1102, 1202, 5102, 6102 e "
+        "5927. É por empresa porque o mesmo NCM pode ter tratamento diferente dependendo da empresa/UF. "
+        "A partir desse cadastro, ao clicar em **Calcular apuração** (aba Apuração) o sistema sinaliza "
+        "duas coisas, sempre para você revisar — ele nunca decide sozinho:"
+    )
+    st.markdown(
+        "- Um NCM que **está** cadastrado aqui mas apareceu num item classificado como **ST** — pode ser "
+        "erro de CFOP no lançamento, ou o produto pode ter deixado de ser tributado.\n"
+        "- Um NCM que **não está** cadastrado mas apareceu como **tributado (não-ST)** — um candidato "
+        "novo para você confirmar se deve entrar na lista."
+    )
     st.caption(
-        "Informações que NÃO vêm dos relatórios de Entrada/Saída: DIFAL (débito), CIAP e DAE Antecipado "
-        "(crédito), e lançamentos de CFOP que o sistema contábil registra direto (ex: CFOP 1602) sem "
-        "passar pelo relatório de NF."
+        "Essas sinalizações aparecem na página **Inconsistências** (tipos 'ncm_tributado_como_st' e "
+        "'ncm_tributado_novo')."
+    )
+
+    ncms_df = listar_ncms_tributados(session, empresa_id)
+    st.caption(f"{len(ncms_df)} NCM(s) cadastrado(s) para {comp['razao_social']}.")
+    ncms_editado = st.data_editor(
+        ncms_df, use_container_width=True, num_rows="dynamic", key="editor_ncms_tributados",
+        column_config={
+            "id": st.column_config.NumberColumn("ID", disabled=True),
+            "ncm": st.column_config.TextColumn("NCM", required=True),
+            "descricao": st.column_config.TextColumn("Descrição (opcional)"),
+            "created_at": st.column_config.DatetimeColumn("Cadastrado em", disabled=True),
+        },
+        column_order=["ncm", "descricao", "created_at", "id"],
+    )
+    st.caption("Para incluir: adicione uma linha nova (ícone + no final da grade) e digite o NCM. "
+               "Para excluir: selecione a linha e apague (ícone de lixeira). Depois clique em Salvar.")
+    if st.button("💾 Salvar lista de NCMs tributados"):
+        resultado = salvar_ncms_tributados(session, empresa_id, ncms_df, ncms_editado)
+        st.success(f"{resultado['incluidos']} incluído(s), {resultado['removidos']} removido(s).")
+        st.rerun()
+
+with aba_ajustes:
+    st.markdown(
+        "**Direcionador de ajustes manuais desta competência.** Cada lançamento aqui é uma informação que "
+        "NÃO veio pronta dos relatórios de Entrada/Saída e precisou ser incluída à mão para a apuração "
+        "bater com o livro fiscal oficial — DIFAL (débito), CIAP e DAE Antecipado (crédito), e CFOPs que o "
+        "sistema contábil lança direto, sem passar por nota fiscal (ex: CFOP 1602). Se o mesmo tipo de "
+        "ajuste se repetir todo mês, é um sinal de que vale a pena corrigir na origem (Winthor) para não "
+        "precisar mais lançar manualmente aqui."
     )
     lancamentos = session.execute(text("""
         select id, tipo, cfop_relacionado, descricao, valor from lancamentos_manuais
@@ -157,11 +226,13 @@ with aba_ajustes:
     col_deb, col_cred = st.columns(2)
     with col_deb:
         st.subheader("Débitos")
-        deb = [l for l in lancamentos if l["tipo"] in ("difal_debito", "ajuste_cfop_debito")]
+        deb = [dict(l, valor=formatar_moeda(l["valor"])) for l in lancamentos
+               if l["tipo"] in ("difal_debito", "ajuste_cfop_debito")]
         st.dataframe(deb, use_container_width=True)
     with col_cred:
         st.subheader("Créditos")
-        cred = [l for l in lancamentos if l["tipo"] in ("ciap_credito", "dae_antecipado_credito", "ajuste_cfop_credito")]
+        cred = [dict(l, valor=formatar_moeda(l["valor"])) for l in lancamentos
+                if l["tipo"] in ("ciap_credito", "dae_antecipado_credito", "ajuste_cfop_credito")]
         st.dataframe(cred, use_container_width=True)
 
     with st.form("novo_lancamento", clear_on_submit=True):
@@ -197,10 +268,13 @@ with aba_apuracao:
             salvar_apuracao(session, cid, linhas)
             n_ncm = gerar_inconsistencias_ncm(session, cid)
             n_transf = gerar_inconsistencias_transferencia(session, cid)
+            n_ncm_trib = gerar_inconsistencias_ncm_tributado(session, cid, empresa_id)
             session.execute(text("update competencias set status = 'calculada' where id = :cid"), {"cid": cid})
             session.commit()
-        st.success(f"Calculado. {n_ncm} inconsistência(s) de NCM e {n_transf} de transferência geradas — "
-                   f"veja a página **Inconsistências**.")
+        st.success(
+            f"Calculado. {n_ncm} inconsistência(s) de NCM x ST, {n_transf} de transferência e "
+            f"{n_ncm_trib} de NCM tributado geradas — veja a página **Inconsistências**."
+        )
         st.rerun()
 
     linhas_db = {r["linha"]: r for r in session.execute(text("""
@@ -216,27 +290,27 @@ with aba_apuracao:
 
         st.markdown("#### DÉBITO DO IMPOSTO")
         st.table(pd.DataFrame([
-            {"Linha": "01", "Descrição": "Por Saídas com débito", "Valor": f"R$ {_linha('01'):,.2f}"},
-            {"Linha": "02", "Descrição": "Outros Débitos", "Valor": f"R$ {_linha('02'):,.2f}"},
-            {"Linha": "03", "Descrição": "Estorno de Créditos", "Valor": f"R$ {_linha('03'):,.2f}"},
-            {"Linha": "04", "Descrição": "Subtotal Débito", "Valor": f"R$ {_linha('04'):,.2f}"},
+            {"Linha": "01", "Descrição": "Por Saídas com débito", "Valor": formatar_moeda(_linha('01'))},
+            {"Linha": "02", "Descrição": "Outros Débitos", "Valor": formatar_moeda(_linha('02'))},
+            {"Linha": "03", "Descrição": "Estorno de Créditos", "Valor": formatar_moeda(_linha('03'))},
+            {"Linha": "04", "Descrição": "Subtotal Débito", "Valor": formatar_moeda(_linha('04'))},
         ]).set_index("Linha"))
 
         st.markdown("#### CRÉDITO DO IMPOSTO")
         st.table(pd.DataFrame([
-            {"Linha": "05", "Descrição": "Por Entradas com crédito", "Valor": f"R$ {_linha('05'):,.2f}"},
-            {"Linha": "06", "Descrição": "Outros Créditos", "Valor": f"R$ {_linha('06'):,.2f}"},
-            {"Linha": "07", "Descrição": "Estorno de Débitos", "Valor": f"R$ {_linha('07'):,.2f}"},
-            {"Linha": "08", "Descrição": "Subtotal Crédito", "Valor": f"R$ {_linha('08'):,.2f}"},
+            {"Linha": "05", "Descrição": "Por Entradas com crédito", "Valor": formatar_moeda(_linha('05'))},
+            {"Linha": "06", "Descrição": "Outros Créditos", "Valor": formatar_moeda(_linha('06'))},
+            {"Linha": "07", "Descrição": "Estorno de Débitos", "Valor": formatar_moeda(_linha('07'))},
+            {"Linha": "08", "Descrição": "Subtotal Crédito", "Valor": formatar_moeda(_linha('08'))},
         ]).set_index("Linha"))
 
         st.markdown("#### APURAÇÃO DO SALDO")
         st.table(pd.DataFrame([
-            {"Linha": "09", "Descrição": "Saldo Credor do Período Anterior", "Valor": f"R$ {_linha('09'):,.2f}"},
-            {"Linha": "11", "Descrição": "Saldo Devedor (Débito menos Crédito)", "Valor": f"R$ {_linha('11'):,.2f}"},
-            {"Linha": "12", "Descrição": "Deduções", "Valor": f"R$ {_linha('12'):,.2f}"},
-            {"Linha": "13", "Descrição": "Imposto a Recolher", "Valor": f"R$ {_linha('13'):,.2f}"},
-            {"Linha": "14", "Descrição": "Saldo Credor a Transportar", "Valor": f"R$ {_linha('14'):,.2f}"},
+            {"Linha": "09", "Descrição": "Saldo Credor do Período Anterior", "Valor": formatar_moeda(_linha('09'))},
+            {"Linha": "11", "Descrição": "Saldo Devedor (Débito menos Crédito)", "Valor": formatar_moeda(_linha('11'))},
+            {"Linha": "12", "Descrição": "Deduções", "Valor": formatar_moeda(_linha('12'))},
+            {"Linha": "13", "Descrição": "Imposto a Recolher", "Valor": formatar_moeda(_linha('13'))},
+            {"Linha": "14", "Descrição": "Saldo Credor a Transportar", "Valor": formatar_moeda(_linha('14'))},
         ]).set_index("Linha"))
 
         st.markdown("---")
@@ -248,8 +322,8 @@ with aba_apuracao:
                 column_config={
                     "linha": st.column_config.TextColumn("Linha", disabled=True),
                     "descricao": st.column_config.TextColumn("Descrição", disabled=True),
-                    "valor_calc": st.column_config.NumberColumn("Calculado", disabled=True, format="%.2f"),
-                    "valor_1025": st.column_config.NumberColumn("Rotina 1025", format="%.2f"),
+                    "valor_calc": coluna_moeda("Calculado", disabled=True),
+                    "valor_1025": coluna_moeda("Rotina 1025"),
                 },
             )
             if st.button("Salvar valores da Rotina 1025"):
@@ -261,6 +335,9 @@ with aba_apuracao:
             divergentes = diffs[diffs["diff"].abs() > 0.05]
             if not divergentes.empty:
                 st.warning(f"{len(divergentes)} linha(s) com diferença acima de R$ 0,05:")
-                st.dataframe(divergentes[["linha", "descricao", "diff"]], use_container_width=True)
+                st.dataframe(
+                    _formatar_moeda_df(divergentes[["linha", "descricao", "diff"]], ["diff"]),
+                    use_container_width=True,
+                )
             elif ref_editado["valor_1025"].notna().any():
                 st.success("Apuração bate com a Rotina 1025.")
