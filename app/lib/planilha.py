@@ -22,8 +22,9 @@ COLUNAS_TODAS = COLUNAS_EDITAVEIS_ENTRADA + ["ncm_descricao", "inconsistencia"]
 
 # Rótulo curto por tipo de inconsistência, pra mostrar direto na grade (pedido do usuário em 06/08/2026:
 # "as inconsistencias encontradas não estão sendo apresentadas na planilha de entrada e saida") — a
-# descrição completa de cada uma continua só na aba Inconsistências, aqui é só um sinal de alerta.
-_LABELS_INCONSISTENCIA = {
+# descrição completa de cada uma continua só na aba Inconsistências, aqui é só um sinal de alerta. Público
+# (sem "_" na frente) porque a página importa para montar o multiselect de filtro por tipo.
+LABELS_INCONSISTENCIA = {
     "ncm_st_inconsistente": "NCM×ST divergente Entrada/Saída",
     "transferencia_nao_vinculada": "Transferência não vinculada",
     "ncm_tributado_como_st": "NCM tributado veio como ST",
@@ -42,12 +43,12 @@ def _formatar_inconsistencia(tipos_raw):
     aqui."""
     if pd.isna(tipos_raw):
         return None
-    labels = [_LABELS_INCONSISTENCIA.get(t, t) for t in str(tipos_raw).split(",")]
+    labels = [LABELS_INCONSISTENCIA.get(t, t) for t in str(tipos_raw).split(",")]
     return "⚠️ " + "; ".join(labels)
 
 
 def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filtro=None, busca=None,
-                    limite=500, somente_inconsistencia=False):
+                    limite=500, tipos_inconsistencia=None, ncm_filtro=None):
     """Devolve (DataFrame, total_sem_filtro_de_limite) — o total serve para avisar o usuário quando a
     tela está mostrando só uma parte dos itens.
 
@@ -59,23 +60,33 @@ def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filt
 
     `inconsistencia` mostra um resumo (rótulo, não a descrição completa) de toda inconsistência PENDENTE
     ligada a este item via `inconsistencia_itens` — pedido do usuário em 06/08/2026, antes só dava pra ver
-    na aba Inconsistências, separada da planilha. `somente_inconsistencia=True` filtra a grade para mostrar
-    só os itens com alguma inconsistência pendente."""
+    na aba Inconsistências, separada da planilha. `tipos_inconsistencia` (lista de códigos de tipo, ex:
+    ["ncm_tributado_novo"]) filtra a grade pra mostrar só os itens com inconsistência PENDENTE de um dos
+    tipos escolhidos — pedido em 06/08/2026 ("preciso filtrar o erro que está sendo apresentado na aba
+    inconsistência"). Lista vazia/None = sem filtro, mostra todos os itens.
+
+    `ncm_filtro` filtra por prefixo do NCM (ex: "8213" pega "82130000", "82131000"...) — pedido em
+    06/08/2026 ("filtrar por ncm também ajuda"), útil pra achar rápido todos os itens de um NCM/capítulo
+    específico, inclusive combinando com o filtro de tipo de inconsistência acima."""
     where = ["ni.competencia_id = :cid", "ni.tipo_operacao = :tipo"]
     params = {"cid": competencia_id, "tipo": tipo_operacao, "empresa_id": empresa_id}
     if cfop_filtro:
         where.append("ni.cfop = :cfop")
         params["cfop"] = cfop_filtro
+    if ncm_filtro:
+        where.append("ni.ncm ilike :ncm_filtro")
+        params["ncm_filtro"] = f"{ncm_filtro.strip()}%"
     if busca:
         where.append("(ni.nf_numero ilike :busca or ni.produto_codigo ilike :busca or "
                       "ni.produto_descricao ilike :busca or ni.parceiro ilike :busca)")
         params["busca"] = f"%{busca}%"
-    if somente_inconsistencia:
+    if tipos_inconsistencia:
         where.append("""exists (
             select 1 from inconsistencia_itens ii2
             join inconsistencias i2 on i2.id = ii2.inconsistencia_id and i2.status = 'pendente'
-            where ii2.nf_item_id = ni.id
+            where ii2.nf_item_id = ni.id and i2.tipo = any(:tipos_inc)
         )""")
+        params["tipos_inc"] = list(tipos_inconsistencia)
     where_sql = " and ".join(where)
 
     total = session.execute(
@@ -155,19 +166,23 @@ def resumo_por_cfop(session, competencia_id, tipo_operacao):
     return pd.DataFrame(rows, columns=["cfop", "descricao", "n", "base", "icms"])
 
 
-def carregar_totalizador(session, competencia_id, tipo_operacao, cfop_filtro=None):
+def carregar_totalizador(session, competencia_id, tipo_operacao, cfop_filtro=None, ncm_filtro=None):
     """Visão SINTÉTICA da planilha — pedido do usuário em 06/08/2026: poder analisar Entrada/Saída
     totalizado por UF + Código do Produto + Alíquota de ICMS, em vez de item a item (visão ANALÍTICA, que
     continua disponível — o analista escolhe qual das duas quer ver, não substitui uma pela outra).
 
     Junta produto_descricao pelo `min()` (assume que o mesmo código de produto tem sempre a mesma
     descrição — é o caso normal; se não for, ainda soma certo, só a descrição mostrada na linha totalizada
-    pode não refletir 100% das notas por trás)."""
+    pode não refletir 100% das notas por trás). `ncm_filtro` filtra por prefixo do NCM, mesmo critério da
+    visão Analítica (ver carregar_itens)."""
     where = ["ni.competencia_id = :cid", "ni.tipo_operacao = :tipo"]
     params = {"cid": competencia_id, "tipo": tipo_operacao}
     if cfop_filtro:
         where.append("ni.cfop = :cfop")
         params["cfop"] = cfop_filtro
+    if ncm_filtro:
+        where.append("ni.ncm ilike :ncm_filtro")
+        params["ncm_filtro"] = f"{ncm_filtro.strip()}%"
     where_sql = " and ".join(where)
 
     rows = session.execute(text(f"""

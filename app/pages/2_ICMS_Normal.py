@@ -9,7 +9,7 @@ from lib.db import get_session
 from lib.planilha import (
     carregar_itens, salvar_itens_editados, resumo_por_cfop, carregar_totalizador,
     carregar_checkpoint_1024_editavel, salvar_checkpoint_1024_bulk,
-    carregar_checkpoint_1025_editavel, salvar_checkpoint_1025_bulk,
+    carregar_checkpoint_1025_editavel, salvar_checkpoint_1025_bulk, LABELS_INCONSISTENCIA,
 )
 from lib.calculo_icms_normal import calcular_apuracao_icms_normal, salvar_apuracao
 from lib.validacoes import gerar_inconsistencias_ncm, gerar_inconsistencias_transferencia
@@ -81,19 +81,23 @@ def _aba_planilha(tipo_operacao, titulo):
     )
     sintetica = visao.startswith("Sintética")
 
-    c1, c2, c3 = st.columns([2, 3, 2])
+    c1, c_ncm, c2, c3 = st.columns([2, 2, 3, 2])
     resumo = resumo_por_cfop(session, cid, tipo_operacao)
     cfops_disponiveis = ["(todos)"] + resumo["cfop"].tolist() if not resumo.empty else ["(todos)"]
     cfop_sel = c1.selectbox("Filtrar por CFOP", cfops_disponiveis, key=f"cfop_{tipo_operacao}")
     cfop_filtro = None if cfop_sel == "(todos)" else int(cfop_sel)
+    ncm_filtro = c_ncm.text_input(
+        "Filtrar por NCM", key=f"ncm_{tipo_operacao}", placeholder="ex: 8213 ou 82130000",
+        help="Filtra por prefixo — '8213' pega qualquer NCM que comece com 8213 (o capítulo inteiro), "
+             "não só o código exato.",
+    )
 
     if sintetica:
-        c2.empty()
         limite = c3.number_input("Máx. linhas na tela", min_value=50, max_value=5000, value=500, step=50,
                                   key=f"limite_{tipo_operacao}")
-        tot = carregar_totalizador(session, cid, tipo_operacao, cfop_filtro)
+        tot = carregar_totalizador(session, cid, tipo_operacao, cfop_filtro, ncm_filtro or None)
         st.caption(f"{len(tot)} combinação(ões) de UF + Código do Produto + Alíquota"
-                   f"{' para este CFOP' if cfop_filtro else ''}.")
+                   f"{' para este CFOP/NCM' if (cfop_filtro or ncm_filtro) else ''}.")
         st.dataframe(
             _formatar_moeda_df(tot.head(limite), ["valor_produto", "base_icms", "valor_icms"]),
             use_container_width=True, height=420,
@@ -113,14 +117,19 @@ def _aba_planilha(tipo_operacao, titulo):
                                key=f"busca_{tipo_operacao}")
         limite = c3.number_input("Máx. linhas na tela", min_value=50, max_value=5000, value=500, step=50,
                                   key=f"limite_{tipo_operacao}")
-        somente_inc = st.checkbox(
-            "⚠️ Mostrar só itens com inconsistência pendente", key=f"somente_inc_{tipo_operacao}",
-            help="Inconsistências geradas ao clicar em 'Calcular apuração' (aba Apuração) — ver também a "
-                 "aba Inconsistências para a descrição completa de cada uma."
+        tipos_inc_sel = st.multiselect(
+            "⚠️ Filtrar por tipo de inconsistência pendente",
+            options=list(LABELS_INCONSISTENCIA.keys()),
+            format_func=lambda t: LABELS_INCONSISTENCIA[t],
+            key=f"tipos_inc_{tipo_operacao}",
+            help="Deixe vazio pra mostrar todos os itens. Escolha um ou mais tipos pra ver só os itens com "
+                 "aquele erro específico pendente — os mesmos tipos da aba Inconsistências (que tem a "
+                 "descrição completa de cada um)."
         )
 
         df, total = carregar_itens(session, cid, tipo_operacao, empresa_id, cfop_filtro, busca or None,
-                                    limite, somente_inconsistencia=somente_inc)
+                                    limite, tipos_inconsistencia=tipos_inc_sel or None,
+                                    ncm_filtro=ncm_filtro or None)
 
         if total > len(df):
             st.warning(f"Mostrando {len(df)} de {total} itens (use o filtro de CFOP ou busca para refinar, "
