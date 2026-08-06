@@ -16,35 +16,41 @@ COLUNAS_EDITAVEIS_ENTRADA = [
 ]
 COLUNAS_EDITAVEIS_SAIDA = COLUNAS_EDITAVEIS_ENTRADA  # mesmo conjunto de colunas visíveis para as duas abas
 
+# Coluna só de leitura, calculada via join com a tabela `ncm` (ver sql/005_ncm.sql) — mostra o que o
+# código NCM significa sem o analista precisar sair da tela. NÃO faz parte de COLUNAS_EDITAVEIS_* porque
+# não é uma coluna real de notas_fiscais_itens (salvar_itens_editados não deve tentar gravar nela).
+COLUNAS_TODAS = COLUNAS_EDITAVEIS_ENTRADA + ["ncm_descricao"]
+
 
 def carregar_itens(session, competencia_id, tipo_operacao, cfop_filtro=None, busca=None, limite=500):
     """Devolve (DataFrame, total_sem_filtro_de_limite) — o total serve para avisar o usuário quando a
     tela está mostrando só uma parte dos itens."""
-    where = ["competencia_id = :cid", "tipo_operacao = :tipo"]
+    where = ["ni.competencia_id = :cid", "ni.tipo_operacao = :tipo"]
     params = {"cid": competencia_id, "tipo": tipo_operacao}
     if cfop_filtro:
-        where.append("cfop = :cfop")
+        where.append("ni.cfop = :cfop")
         params["cfop"] = cfop_filtro
     if busca:
-        where.append("(nf_numero ilike :busca or produto ilike :busca or parceiro ilike :busca)")
+        where.append("(ni.nf_numero ilike :busca or ni.produto ilike :busca or ni.parceiro ilike :busca)")
         params["busca"] = f"%{busca}%"
     where_sql = " and ".join(where)
 
     total = session.execute(
-        text(f"select count(*) from notas_fiscais_itens where {where_sql}"), params
+        text(f"select count(*) from notas_fiscais_itens ni where {where_sql}"), params
     ).scalar()
 
     params["limite"] = limite
     rows = session.execute(text(f"""
-        select id, nf_numero, parceiro, produto, ncm, cfop, valor_produto, aliq_icms, base_icms,
-               valor_icms, uf
-        from notas_fiscais_itens
+        select ni.id, ni.nf_numero, ni.parceiro, ni.produto, ni.ncm, ni.cfop, ni.valor_produto,
+               ni.aliq_icms, ni.base_icms, ni.valor_icms, ni.uf, n.descricao as ncm_descricao
+        from notas_fiscais_itens ni
+        left join ncm n on n.codigo = ni.ncm
         where {where_sql}
-        order by nf_numero
+        order by ni.nf_numero
         limit :limite
     """), params).mappings().all()
 
-    df = pd.DataFrame(rows, columns=COLUNAS_EDITAVEIS_ENTRADA)
+    df = pd.DataFrame(rows, columns=COLUNAS_TODAS)
     return df, total
 
 

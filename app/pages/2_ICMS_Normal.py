@@ -87,8 +87,15 @@ def _aba_planilha(tipo_operacao, titulo):
 
     editado = st.data_editor(
         df, use_container_width=True, height=420, num_rows="fixed", key=f"editor_{tipo_operacao}",
+        column_order=["id", "nf_numero", "parceiro", "produto", "ncm", "ncm_descricao", "cfop",
+                      "valor_produto", "aliq_icms", "base_icms", "valor_icms", "uf"],
         column_config={
             "id": st.column_config.NumberColumn("ID", disabled=True),
+            "ncm_descricao": st.column_config.TextColumn(
+                "O que é este NCM", disabled=True, width="large",
+                help="Descrição oficial da Tabela NCM (Receita Federal/Classif), só para consulta — não é "
+                     "gravada, vem de um cruzamento automático com o código NCM."
+            ),
             "valor_produto": coluna_moeda("Valor Produto"),
             "base_icms": coluna_moeda("Base ICMS"),
             "valor_icms": coluna_moeda("Valor ICMS"),
@@ -191,16 +198,21 @@ with aba_ncm:
     )
 
     ncms_df = listar_ncms_tributados(session, empresa_id)
-    st.caption(f"{len(ncms_df)} NCM(s) cadastrado(s) para {comp['razao_social']}.")
+    st.caption(f"{len(ncms_df)} NCM(s) cadastrado(s) para {comp['razao_social']}. A coluna \"Descrição "
+               "oficial\" vem da Tabela NCM da Receita Federal automaticamente — só digite algo em "
+               "\"Observação\" se quiser anotar algo próprio.")
     ncms_editado = st.data_editor(
         ncms_df, use_container_width=True, num_rows="dynamic", key="editor_ncms_tributados",
         column_config={
             "id": st.column_config.NumberColumn("ID", disabled=True),
             "ncm": st.column_config.TextColumn("NCM", required=True),
-            "descricao": st.column_config.TextColumn("Descrição (opcional)"),
+            "descricao_oficial": st.column_config.TextColumn(
+                "Descrição oficial (Tabela NCM)", disabled=True, width="large"
+            ),
+            "descricao": st.column_config.TextColumn("Observação (opcional)"),
             "created_at": st.column_config.DatetimeColumn("Cadastrado em", disabled=True),
         },
-        column_order=["ncm", "descricao", "created_at", "id"],
+        column_order=["ncm", "descricao_oficial", "descricao", "created_at", "id"],
     )
     st.caption("Para incluir: adicione uma linha nova (ícone + no final da grade) e digite o NCM. "
                "Para excluir: selecione a linha e apague (ícone de lixeira). Depois clique em Salvar.")

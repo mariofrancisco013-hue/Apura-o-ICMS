@@ -15,11 +15,16 @@ from sqlalchemy import text
 
 
 def listar_ncms_tributados(session, empresa_id: int) -> pd.DataFrame:
+    """`descricao_oficial` vem da tabela de referência `ncm` (sql/005_ncm.sql, carregada por
+    scripts/seed_ncm.py) — vazia se essa tabela ainda não tiver sido carregada, ou se o código não for
+    encontrado nela. `descricao` continua sendo um campo livre, para observação própria do analista."""
     rows = session.execute(text("""
-        select id, ncm, descricao, created_at from ncms_tributados
-        where empresa_id = :eid order by ncm
+        select t.id, t.ncm, t.descricao, n.descricao as descricao_oficial, t.created_at
+        from ncms_tributados t
+        left join ncm n on n.codigo = t.ncm
+        where t.empresa_id = :eid order by t.ncm
     """), {"eid": empresa_id}).mappings().all()
-    return pd.DataFrame(rows, columns=["id", "ncm", "descricao", "created_at"])
+    return pd.DataFrame(rows, columns=["id", "ncm", "descricao", "descricao_oficial", "created_at"])
 
 
 def salvar_ncms_tributados(session, empresa_id: int, df_original: pd.DataFrame, df_editado: pd.DataFrame) -> dict:
