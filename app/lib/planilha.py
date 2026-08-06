@@ -7,6 +7,7 @@ alguma linha está errada, e a digitar os totais da Rotina 1024/1025 de uma vez,
 formulário. As funções aqui trocam consultas linha-a-linha por operações em lote (bater com o jeito de
 trabalhar do usuário e também evitar o problema de performance encontrado em 05/08/2026).
 """
+import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
@@ -117,6 +118,27 @@ def carregar_itens(session, competencia_id, tipo_operacao, empresa_id, cfop_filt
     return df[COLUNAS_TODAS], total
 
 
+def _para_tipo_nativo(v):
+    """Converte escalares numpy (numpy.int64, numpy.float64, numpy.bool_...) para o tipo nativo do Python
+    equivalente.
+
+    Achado em 06/08/2026 investigando `sqlalchemy.exc.ProgrammingError` ao salvar uma edição de CFOP na
+    planilha: `pd.DataFrame(rows, ...)` (usado em carregar_itens) e o DataFrame que o `st.data_editor`
+    devolve guardam colunas numéricas como numpy.int64/float64, não int/float nativos do Python — mesmo
+    quando o valor de origem já era um int nativo do psycopg2. O psycopg2 não sabe adaptar tipos numpy
+    diretamente como parâmetro de bind (`can't adapt type 'numpy.int64'`), e isso derruba a query inteira
+    com ProgrammingError assim que qualquer campo numérico (cfop, valor_produto, aliq_icms, base_icms,
+    valor_icms, ou o próprio id) muda de valor — não é sobre produto_codigo/produto_descricao existirem ou
+    não na tabela."""
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        return float(v)
+    return v
+
+
 def salvar_itens_editados(session, df_original, df_editado):
     """Compara linha a linha (pela coluna id) e só grava no banco o que realmente mudou. Retorna quantas
     linhas foram atualizadas."""
@@ -138,7 +160,7 @@ def salvar_itens_editados(session, df_original, df_editado):
                 continue
             if v_orig != v_edit:
                 mudou = True
-            valores[campo] = None if pd.isna(v_edit) else v_edit
+            valores[campo] = None if pd.isna(v_edit) else _para_tipo_nativo(v_edit)
         if mudou:
             session.execute(text("""
                 update notas_fiscais_itens
@@ -147,7 +169,7 @@ def salvar_itens_editados(session, df_original, df_editado):
                     valor_produto=:valor_produto, aliq_icms=:aliq_icms, base_icms=:base_icms,
                     valor_icms=:valor_icms, uf=:uf
                 where id=:id
-            """), {**valores, "id": item_id})
+            """), {**valores, "id": _para_tipo_nativo(item_id)})
             atualizados += 1
     if atualizados:
         session.commit()
