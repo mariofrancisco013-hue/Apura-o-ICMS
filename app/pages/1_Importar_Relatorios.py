@@ -31,19 +31,41 @@ arq_saida = st.file_uploader("Relatório de Saída (.xls)", type=["xls"])
 comp = session.execute(text("""
     select id from competencias where empresa_id=:eid and ano=:ano and mes=:mes and modulo='icms_normal'
 """), {"eid": empresa["id"], "ano": ano, "mes": mes}).fetchone()
-ja_importado = False
-if comp:
-    n = session.execute(
-        text("select count(*) from notas_fiscais_itens where competencia_id=:cid"), {"cid": comp[0]}
-    ).scalar()
-    ja_importado = n > 0
-    if ja_importado:
-        st.warning(f"Esta competência já tem {n} itens importados. Marque a opção abaixo para substituir "
-                   f"(reimportação de relatório corrigido) — sem isso, a importação é bloqueada para "
-                   f"evitar duplicar notas fiscais.")
 
-substituir = st.checkbox("Substituir importação existente desta competência", value=False,
-                          disabled=not ja_importado)
+# Conta Entrada e Saída separadamente: reimportar um dos dois não deve mexer no outro (bug corrigido em
+# 06/08/2026 — antes a checagem/exclusão de "substituir" tratava os dois tipos juntos, então corrigir a
+# Saída apagava a Entrada já importada, ou ficava bloqueado por causa dela sem jeito de contornar).
+n_entrada = n_saida = 0
+if comp:
+    contagem = dict(session.execute(text("""
+        select tipo_operacao, count(*) from notas_fiscais_itens where competencia_id=:cid
+        group by tipo_operacao
+    """), {"cid": comp[0]}).all())
+    n_entrada = contagem.get("entrada", 0)
+    n_saida = contagem.get("saida", 0)
+
+tipos_neste_envio = []
+if arq_entrada:
+    tipos_neste_envio.append("entrada")
+if arq_saida:
+    tipos_neste_envio.append("saida")
+ja_importado_no_envio = (arq_entrada and n_entrada > 0) or (arq_saida and n_saida > 0)
+
+if n_entrada or n_saida:
+    st.caption(f"Já importados nesta competência: **{n_entrada}** itens de Entrada, **{n_saida}** itens de Saída.")
+if ja_importado_no_envio:
+    partes_aviso = []
+    if arq_entrada and n_entrada:
+        partes_aviso.append(f"Entrada ({n_entrada} itens)")
+    if arq_saida and n_saida:
+        partes_aviso.append(f"Saída ({n_saida} itens)")
+    st.warning(f"Esta competência já tem itens importados de: {', '.join(partes_aviso)}. Marque a opção "
+               f"abaixo para substituir (reimportação de relatório corrigido) — sem isso, a importação "
+               f"desses arquivos é bloqueada para evitar duplicar notas fiscais. Isso só afeta o(s) tipo(s) "
+               f"que você está enviando agora — o outro tipo (se já importado) não é alterado.")
+
+substituir = st.checkbox("Substituir importação existente desta competência (só do(s) arquivo(s) enviados agora)",
+                          value=False, disabled=not ja_importado_no_envio)
 
 if st.button("Importar", type="primary", disabled=not (arq_entrada or arq_saida)):
     from lib.importacao import importar

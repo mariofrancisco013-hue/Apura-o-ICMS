@@ -54,24 +54,46 @@ def get_or_create_competencia(session, empresa_cnpj, ano, mes, modulo="icms_norm
         insert into competencias (empresa_id, ano, mes, modulo, status)
         values (:eid, :ano, :mes, :modulo, 'aberta') returning id
     """), {"eid": empresa_id, "ano": ano, "mes": mes, "modulo": modulo})
+    # lê o id ANTES do commit — dar commit com o cursor do INSERT...RETURNING ainda não consumido pode
+    # falhar dependendo do driver (achado testando localmente com SQLite; mais seguro em qualquer banco).
+    novo_id = result.fetchone()[0]
     session.commit()
-    return result.fetchone()[0]
+    return novo_id
 
 
-def checar_duplicacao(session, competencia_id, substituir):
+def checar_duplicacao(session, competencia_id, tipos, substituir):
+    """`tipos` é a lista de tipo_operacao sendo importados agora (ex: ['saida'], ou ['entrada','saida']
+    quando os dois arquivos são enviados juntos). A checagem e a exclusão em caso de substituição são
+    restritas a esses tipos — reimportar só a Saída NÃO deve apagar a Entrada já importada da mesma
+    competência, e vice-versa (bug encontrado em 06/08/2026: a versão anterior contava/apagava tudo junto,
+    então marcar "substituir" para corrigir a Saída também apagava a Entrada sem avisar; e sem marcar,
+    reimportar a Saída ficava bloqueado para sempre por causa da Entrada já existente)."""
+    placeholders = ", ".join(f":t{i}" for i in range(len(tipos)))
+    params = {f"t{i}": t for i, t in enumerate(tipos)}
+    params["cid"] = competencia_id
+
     n = session.execute(
-        text("select count(*) from notas_fiscais_itens where competencia_id = :cid"),
-        {"cid": competencia_id},
+        text(f"select count(*) from notas_fiscais_itens where competencia_id = :cid "
+             f"and tipo_operacao in ({placeholders})"),
+        params,
     ).scalar()
     if n and not substituir:
         raise ValueError(
-            f"Já existem {n} itens importados para esta competência. Marque/passe --substituir se este é "
-            f"um relatório corrigido (evita duplicar por engano)."
+            f"Já existem {n} itens de {'/'.join(tipos)} importados para esta competência. Marque/passe "
+            f"--substituir se este é um relatório corrigido (evita duplicar por engano). Isso NÃO afeta "
+            f"os itens de outro tipo (Entrada/Saída) já importados para esta competência."
         )
     if n and substituir:
-        session.execute(text("delete from notas_fiscais_itens where competencia_id = :cid"), {"cid": competencia_id})
-        session.execute(text("delete from apuracao_linhas where competencia_id = :cid"), {"cid": competencia_id})
+        # ordem importa: inconsistências e apuração referenciam os itens (FK), por isso saem primeiro.
+        # Apuração/inconsistências da competência inteira são limpas porque dependem de Entrada+Saída
+        # juntas — serão recalculadas depois que todos os arquivos desta rodada forem importados.
         session.execute(text("delete from inconsistencias where competencia_id = :cid"), {"cid": competencia_id})
+        session.execute(text("delete from apuracao_linhas where competencia_id = :cid"), {"cid": competencia_id})
+        session.execute(
+            text(f"delete from notas_fiscais_itens where competencia_id = :cid "
+                 f"and tipo_operacao in ({placeholders})"),
+            params,
+        )
         session.commit()
     return n or 0
 
@@ -141,11 +163,16 @@ def importar(session, empresa_cnpj, ano, mes, arquivo_entrada=None, arquivo_said
         raise ValueError("Informe pelo menos um arquivo (Entrada e/ou Saída).")
 
     competencia_id = get_or_create_competencia(session, empresa_cnpj, ano, mes)
-    removidos = checar_duplicacao(session, competencia_id, substituir)
+    tipos = []
+    if arquivo_entrada:
+        tipos.append("entrada")
+    if arquivo_saida:
+        tipos.append("saida")
+    removidos = checar_duplicacao(session, competencia_id, tipos, substituir)
 
     partes = []
     if removidos:
-        partes.append(f"{removidos} itens antigos removidos (substituição).")
+        partes.append(f"{removidos} itens antigos de {'/'.join(tipos)} removidos (substituição).")
     if arquivo_entrada:
         n = importar_arquivo(session, arquivo_entrada, "entrada", competencia_id)
         partes.append(f"Entrada: {n} itens importados.")
