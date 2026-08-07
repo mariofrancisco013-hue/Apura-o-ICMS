@@ -22,6 +22,7 @@ from lib.cfops_sem_validacao import (
     listar_cfops_sem_validacao, salvar_cfops_sem_validacao, cfops_excluidos_validacao,
 )
 from lib.importar_1024 import parse_rotina_1024
+from lib.importar_1025 import parse_rotina_1025
 from lib.formatacao import formatar_moeda, coluna_moeda
 from lib.status_apuracao import status_competencia
 from sqlalchemy import text
@@ -602,7 +603,28 @@ with aba_apuracao:
 
         st.markdown("---")
         with st.expander("📎 Conferência com a Rotina 1025 (livro completo)"):
-            st.caption("Preencha 'valor_1025' com o valor de cada linha do livro fiscal oficial.")
+            st.caption(
+                "Anexe o PDF do Livro Registro de Apuração do ICMS (Rotina 1025) e clique em Importar — "
+                "preenche as 14 linhas (01 a 14) automaticamente, sem digitar. Se preferir, também dá para "
+                "editar/colar valor a valor direto na grade abaixo."
+            )
+            c_up1025_1, c_up1025_2 = st.columns([3, 1])
+            pdf_1025 = c_up1025_1.file_uploader(
+                "PDF da Rotina 1025", type=["pdf"], key="upload_1025", label_visibility="collapsed",
+            )
+            if c_up1025_2.button("📥 Importar do PDF", key="importar_1025", disabled=pdf_1025 is None):
+                try:
+                    valores_1025 = parse_rotina_1025(pdf_1025)
+                    df_1025 = pd.DataFrame([
+                        {"linha": linha, "valor_1025": float(valor)}
+                        for linha, valor in valores_1025.items()
+                    ])
+                    n = salvar_checkpoint_1025_bulk(session, cid, df_1025)
+                    st.success(f"{n} linha(s) importada(s) do PDF da Rotina 1025.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
             ref = carregar_checkpoint_1025_editavel(session, cid)
             ref_editado = st.data_editor(
                 ref, use_container_width=True, key="checkpoint1025",
