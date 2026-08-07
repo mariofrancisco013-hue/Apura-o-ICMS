@@ -10,7 +10,9 @@ cada CFOP aparece como uma linha de texto simples nas seções "Entradas" e "Sa�
     │ │    │         │        │      └─ Isentas/Não Tributadas
     │ │    │         │        └─ Imposto Creditado/Debitado  (o que interessa comparar com valor_icms)
     │ │    │         └─ Base de Cálculo                       (o que interessa comparar com base_icms)
-    │ │    └─ Valores Contábeis (não usado na conferência)
+    │ │    └─ Valores Contábeis (não usado na conferência do ICMS Normal, mas é a base da Apuração ICMS PE
+    │ │       — ver app/lib/calculo_icms_pe.py, confirmado batendo exato contra a planilha real da Ultra
+    │ │       Comércio em 07/08/2026)
     │ └─ CFOP ("Fiscal")
     └─ Código "Contabil" (sempre 0 nos arquivos vistos até agora)
 
@@ -39,8 +41,10 @@ def _para_decimal(s: str) -> Decimal:
 
 def parse_rotina_1024(arquivo) -> list[dict]:
     """`arquivo` é um caminho ou um buffer tipo st.file_uploader (PDF do RAICMS Modelo P9). Devolve uma
-    lista de dicts {cfop, valor_base, valor_icms} — um por código de CFOP encontrado nas seções de
-    Entradas e Saídas (ignora as linhas de "Sub Totais"/"Totais", que não têm CFOP de 4 dígitos isolado).
+    lista de dicts {cfop, valor_contabil, valor_base, valor_icms} — um por código de CFOP encontrado nas
+    seções de Entradas e Saídas (ignora as linhas de "Sub Totais"/"Totais", que não têm CFOP de 4 dígitos
+    isolado). `valor_contabil` foi adicionado em 07/08/2026 pro módulo de Apuração ICMS PE — o ICMS Normal
+    continua usando só valor_base/valor_icms, então essa chave extra não quebra nada lá.
     Lança ValueError se nenhuma linha reconhecível for encontrada (arquivo no layout errado)."""
     resultado = []
     with pdfplumber.open(arquivo) as pdf:
@@ -55,8 +59,9 @@ def parse_rotina_1024(arquivo) -> list[dict]:
                     continue  # evita casar números que não são CFOP por coincidência de formato
                 resultado.append({
                     "cfop": cfop,
-                    "valor_base": _para_decimal(m.group(3)),   # "Base de Cálculo"
-                    "valor_icms": _para_decimal(m.group(4)),   # "Imposto Creditado"/"Imposto Debitado"
+                    "valor_contabil": _para_decimal(m.group(2)),  # "Valores Contábeis"
+                    "valor_base": _para_decimal(m.group(3)),      # "Base de Cálculo"
+                    "valor_icms": _para_decimal(m.group(4)),      # "Imposto Creditado"/"Imposto Debitado"
                 })
     if not resultado:
         raise ValueError(
