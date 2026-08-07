@@ -203,7 +203,7 @@ def carregar_historico_edicoes(session, competencia_id, tipo_operacao, limite=20
     pedido do usuário em 06/08/2026 ("não localizei onde eu vejo os ajustes que foram feitos")."""
     rows = session.execute(text("""
         select a.id, a.nf_item_id, ni.nf_numero, ni.produto_codigo, a.campo, a.valor_anterior,
-               a.valor_novo, a.editado_por_email, a.editado_em
+               a.valor_novo, a.justificativa, a.editado_por_email, a.editado_em
         from auditoria_edicoes_planilha a
         left join notas_fiscais_itens ni on ni.id = a.nf_item_id
         where a.competencia_id = :cid and a.tipo_operacao = :tipo
@@ -212,8 +212,90 @@ def carregar_historico_edicoes(session, competencia_id, tipo_operacao, limite=20
     """), {"cid": competencia_id, "tipo": tipo_operacao, "limite": limite}).mappings().all()
     return pd.DataFrame(rows, columns=[
         "id", "nf_item_id", "nf_numero", "produto_codigo", "campo", "valor_anterior", "valor_novo",
-        "editado_por_email", "editado_em",
+        "justificativa", "editado_por_email", "editado_em",
     ])
+
+
+def listar_nfs_disponiveis(session, competencia_id, tipo_operacao):
+    """Lista de NFs distintas desta competência/tipo, para o seletor de 'Zerar Base/Alíquota'."""
+    return session.execute(text("""
+        select distinct nf_numero from notas_fiscais_itens
+        where competencia_id = :cid and tipo_operacao = :tipo
+        order by nf_numero
+    """), {"cid": competencia_id, "tipo": tipo_operacao}).scalars().all()
+
+
+def listar_cfops_da_nf(session, competencia_id, tipo_operacao, nf_numero):
+    """CFOPs distintos usados por uma NF específica — o 'Zerar Base/Alíquota' é sempre por NF+CFOP, nunca a
+    NF inteira, porque uma mesma NF pode ter itens em CFOPs diferentes (nem todos precisam ser zerados)."""
+    return session.execute(text("""
+        select distinct cfop from notas_fiscais_itens
+        where competencia_id = :cid and tipo_operacao = :tipo and nf_numero = :nf
+        order by cfop
+    """), {"cid": competencia_id, "tipo": tipo_operacao, "nf": nf_numero}).scalars().all()
+
+
+def previsualizar_zerar_base_aliquota(session, competencia_id, tipo_operacao, nf_numero, cfop):
+    """Itens que seriam afetados por `zerar_base_aliquota`, com os valores ATUAIS — mostrado ao analista
+    antes de confirmar, já que é uma ação em lote (afeta todos os itens da NF+CFOP de uma vez)."""
+    rows = session.execute(text("""
+        select id, produto_codigo, produto_descricao, ncm, valor_produto, aliq_icms, base_icms, valor_icms
+        from notas_fiscais_itens
+        where competencia_id = :cid and tipo_operacao = :tipo and nf_numero = :nf and cfop = :cfop
+        order by id
+    """), {"cid": competencia_id, "tipo": tipo_operacao, "nf": nf_numero, "cfop": cfop}).mappings().all()
+    return pd.DataFrame(rows, columns=[
+        "id", "produto_codigo", "produto_descricao", "ncm", "valor_produto", "aliq_icms", "base_icms",
+        "valor_icms",
+    ])
+
+
+def zerar_base_aliquota(session, competencia_id, tipo_operacao, nf_numero, cfop, justificativa, usuario=None):
+    """Zera base_icms, aliq_icms e valor_icms de TODOS os itens de uma NF+CFOP nesta competência de uma vez
+    só — pedido do usuário em 06/08/2026: "criar uma forma de selecionar a nota, o cfop e zerar a base de
+    cálculo e a alíquota com uma justificativa", para quando um lançamento não deveria gerar débito/crédito
+    de ICMS (ex: isenção, situação tributária que zera a tributação daquele CFOP), sem precisar editar item
+    a item na grade quando a NF tem muitas linhas.
+
+    Grava no mesmo histórico de `salvar_itens_editados` (auditoria_edicoes_planilha), com a justificativa
+    preenchida em cada linha — itens que já estavam zerados nesses 3 campos não geram entrada duplicada no
+    histórico. Retorna quantos itens foram afetados (0 se a combinação NF+CFOP não existir)."""
+    itens = session.execute(text("""
+        select id, aliq_icms, base_icms, valor_icms from notas_fiscais_itens
+        where competencia_id = :cid and tipo_operacao = :tipo and nf_numero = :nf and cfop = :cfop
+    """), {"cid": competencia_id, "tipo": tipo_operacao, "nf": nf_numero, "cfop": cfop}).mappings().all()
+    if not itens:
+        return 0
+
+    usuario = usuario or {}
+    auditoria = []
+    for it in itens:
+        for campo in ("base_icms", "aliq_icms", "valor_icms"):
+            valor_atual = it[campo]
+            if valor_atual is not None and float(valor_atual) == 0:
+                continue  # já zerado — não polui o histórico com "0 -> 0"
+            auditoria.append({
+                "nf_item_id": _para_tipo_nativo(it["id"]),
+                "competencia_id": competencia_id,
+                "tipo_operacao": tipo_operacao,
+                "campo": campo,
+                "valor_anterior": None if valor_atual is None else str(valor_atual),
+                "valor_novo": "0",
+                "justificativa": justificativa,
+                "editado_por": usuario.get("id"),
+                "editado_por_email": usuario.get("email"),
+            })
+    if auditoria:
+        pd.DataFrame(auditoria).to_sql(
+            "auditoria_edicoes_planilha", session.bind, if_exists="append", index=False
+        )
+
+    session.execute(text("""
+        update notas_fiscais_itens set base_icms = 0, aliq_icms = 0, valor_icms = 0
+        where competencia_id = :cid and tipo_operacao = :tipo and nf_numero = :nf and cfop = :cfop
+    """), {"cid": competencia_id, "tipo": tipo_operacao, "nf": nf_numero, "cfop": cfop})
+    session.commit()
+    return len(itens)
 
 
 def resumo_por_cfop(session, competencia_id, tipo_operacao):

@@ -14,8 +14,17 @@ dados reais de julho/2026 da Sodine Atacado F3):
   crédito/débito "bruto" (Base × Alíquota) que É integralmente estornado (linha 03 na Entrada, linha 07 na
   Saída) — efeito líquido zero, mas os dois lados (bruto e estorno) aparecem no livro.
 - CFOP is_st=False (compra/venda normal, ex: 1102, 5102): gera crédito/débito pleno, sem estorno.
-- Linha "01 - Por Saídas com débito" fica zerada nos dados observados — no livro real da Sodine, todo
-  débito de venda cai em "02 - Outros Débitos" (comportamento do sistema de origem, reproduzido aqui).
+
+CORREÇÃO (06/08/2026): até aqui, TODO débito de saída (ST ou não) caía direto na "02 - Outros Débitos", e a
+"01 - Por Saídas com débito" ficava sempre zerada — essa regra tinha sido tirada de uma leitura do PDF do
+Livro Registro de Apuração real da Sodine, mas a leitura estava errada: o valor que parecia estar alinhado
+com a linha "02" era, na verdade, da linha "01" (o PDF quebra a linha por causa da descrição longa de "01",
+o que engana visualmente). Corrigido: agora TODO débito de saída (bruto, ST ou não) vai para a "01 - Por
+Saídas com débito" (a parte ST continua sendo estornada na "07", igual antes, só mudou de qual linha ela
+"sai"). A "02 - Outros Débitos" agora é só a soma dos lançamentos manuais de débito (aba Ajustes na
+Apuração, tipo "ajuste_cfop_debito") — não recebe mais nada calculado automaticamente dos itens de NF.
+Não muda o total final (linha 04 = 01+02+03 continua a mesma soma), só corrige em qual linha específica
+cada valor aparece, pra bater exatamente com o livro oficial linha a linha.
 """
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -53,12 +62,12 @@ def calcular_apuracao_icms_normal(session, competencia_id: int) -> list[LinhaApu
     """), {"cid": competencia_id}).mappings().all()
 
     # --- acumuladores por linha, com detalhe por CFOP para auditoria ---
-    outros_debitos = Decimal("0")            # 02
+    debito_saidas = Decimal("0")              # 01  (TODO débito de saída, bruto — ST ou não)
     estorno_creditos = Decimal("0")           # 03  (entrada, ST não-transferência)
     entradas_com_credito = Decimal("0")       # 05  (entrada, não-ST)
-    estorno_debitos = Decimal("0")            # 07  (saída, ST não-transferência)
+    estorno_debitos = Decimal("0")            # 07  (saída, ST não-transferência — estorna parte da 01)
 
-    det_02, det_03, det_05, det_07 = {}, {}, {}, {}
+    det_01, det_03, det_05, det_07 = {}, {}, {}, {}
 
     for it in itens:
         icms = _to_decimal(it["valor_icms"])
@@ -71,9 +80,10 @@ def calcular_apuracao_icms_normal(session, competencia_id: int) -> list[LinhaApu
             continue
 
         if it["tipo_operacao"] == "saida":
-            # débito bruto sempre entra em "02 - Outros Débitos" (comportamento observado no livro real)
-            outros_debitos += icms
-            det_02[cfop] = det_02.get(cfop, Decimal("0")) + icms
+            # débito bruto de TODA saída (ST ou não) vai para "01 - Por Saídas com débito" (ver docstring
+            # do módulo — correção de 06/08/2026, antes ia pra "02" por engano)
+            debito_saidas += icms
+            det_01[cfop] = det_01.get(cfop, Decimal("0")) + icms
             if is_st:
                 estorno_debitos += icms
                 det_07[cfop] = det_07.get(cfop, Decimal("0")) + icms
@@ -101,14 +111,16 @@ def calcular_apuracao_icms_normal(session, competencia_id: int) -> list[LinhaApu
     ajuste_cfop_credito = sum(
         (_to_decimal(l["valor"]) for l in lancamentos if l["tipo"] == "ajuste_cfop_credito"), Decimal("0")
     )
-    ajuste_cfop_debito = sum(
+    # "02 - Outros Débitos" agora é só isto: a soma dos lançamentos manuais de débito (ver docstring do
+    # módulo, correção de 06/08/2026) — não recebe mais nada calculado automaticamente dos itens de NF.
+    outros_debitos = sum(
         (_to_decimal(l["valor"]) for l in lancamentos if l["tipo"] == "ajuste_cfop_debito"), Decimal("0")
     )
+    det_02 = {l["descricao"]: _to_decimal(l["valor"]) for l in lancamentos if l["tipo"] == "ajuste_cfop_debito"}
     entradas_com_credito += ajuste_cfop_credito
-    outros_debitos += ajuste_cfop_debito
 
     # --- linhas do livro ---
-    linha_01 = Decimal("0")  # por saídas com débito — zerada (ver docstring)
+    linha_01 = debito_saidas
     linha_02 = outros_debitos
     linha_03 = estorno_creditos
     linha_04 = linha_01 + linha_02 + linha_03           # subtotal débito
@@ -128,8 +140,8 @@ def calcular_apuracao_icms_normal(session, competencia_id: int) -> list[LinhaApu
         linha_14 = Decimal("0")
 
     linhas = [
-        LinhaApuracao("01", "Por Saídas com débito", linha_01),
-        LinhaApuracao("02", "Outros Débitos", linha_02, {"por_cfop": det_02}),
+        LinhaApuracao("01", "Por Saídas com débito", linha_01, {"por_cfop": det_01}),
+        LinhaApuracao("02", "Outros Débitos", linha_02, {"lancamentos_manuais": {k: str(v) for k, v in det_02.items()}}),
         LinhaApuracao("03", "Estorno de Créditos", linha_03, {"por_cfop": det_03}),
         LinhaApuracao("04", "Subtotal Débito", linha_04),
         LinhaApuracao("05", "Por Entradas com crédito", linha_05, {"por_cfop": det_05}),

@@ -10,14 +10,17 @@ from lib.planilha import (
     carregar_itens, salvar_itens_editados, resumo_por_cfop, carregar_totalizador,
     carregar_checkpoint_1024_editavel, salvar_checkpoint_1024_bulk,
     carregar_checkpoint_1025_editavel, salvar_checkpoint_1025_bulk, LABELS_INCONSISTENCIA,
-    carregar_historico_edicoes,
+    carregar_historico_edicoes, listar_nfs_disponiveis, listar_cfops_da_nf,
+    previsualizar_zerar_base_aliquota, zerar_base_aliquota,
 )
 from lib.calculo_icms_normal import calcular_apuracao_icms_normal, salvar_apuracao
 from lib.validacoes import gerar_inconsistencias_ncm, gerar_inconsistencias_transferencia
 from lib.ncm_tributado import (
     listar_ncms_tributados, salvar_ncms_tributados, gerar_inconsistencias_ncm_tributado,
 )
-from lib.cfops_sem_validacao import listar_cfops_sem_validacao, salvar_cfops_sem_validacao
+from lib.cfops_sem_validacao import (
+    listar_cfops_sem_validacao, salvar_cfops_sem_validacao, cfops_excluidos_validacao,
+)
 from lib.importar_1024 import parse_rotina_1024
 from lib.formatacao import formatar_moeda, coluna_moeda
 from lib.status_apuracao import status_competencia
@@ -187,6 +190,76 @@ def _aba_planilha(tipo_operacao, titulo):
                 st.info("Nenhuma mudança detectada.")
             st.rerun()
 
+    with st.expander("🧹 Zerar Base de Cálculo e Alíquota de uma NF + CFOP"):
+        st.caption(
+            "Para quando um lançamento (NF + CFOP inteiro) não deveria gerar débito/crédito de ICMS nesta "
+            "competência (ex: isenção, situação tributária que zera a tributação) — zera base_icms, "
+            "aliq_icms e valor_icms de TODOS os itens dessa NF+CFOP de uma vez, com justificativa "
+            "obrigatória, em vez de editar item a item na grade. Fica registrado no histórico logo abaixo."
+        )
+        nfs_disp = listar_nfs_disponiveis(session, cid, tipo_operacao)
+        if not nfs_disp:
+            st.caption("Nenhuma NF importada nesta competência.")
+        else:
+            c_nf, c_cfop = st.columns(2)
+            nf_sel_zerar = c_nf.selectbox("NF", nfs_disp, key=f"zerar_nf_{tipo_operacao}")
+            cfops_da_nf = listar_cfops_da_nf(session, cid, tipo_operacao, nf_sel_zerar) if nf_sel_zerar else []
+            cfop_sel_zerar = (
+                c_cfop.selectbox("CFOP", cfops_da_nf, key=f"zerar_cfop_{tipo_operacao}")
+                if cfops_da_nf else None
+            )
+
+            if cfop_sel_zerar is not None:
+                preview_zerar = previsualizar_zerar_base_aliquota(
+                    session, cid, tipo_operacao, nf_sel_zerar, cfop_sel_zerar
+                )
+                if preview_zerar.empty:
+                    st.caption("Nenhum item encontrado para essa combinação.")
+                else:
+                    st.dataframe(
+                        _formatar_moeda_df(preview_zerar, ["valor_produto", "base_icms", "valor_icms"]),
+                        use_container_width=True,
+                        column_config={
+                            "id": st.column_config.NumberColumn("ID"),
+                            "produto_codigo": st.column_config.TextColumn("Código Produto"),
+                            "produto_descricao": st.column_config.TextColumn("Descrição Produto"),
+                            "ncm": st.column_config.TextColumn("NCM"),
+                            "aliq_icms": st.column_config.NumberColumn("Alíquota atual %"),
+                        },
+                    )
+                    total_icms_atual = preview_zerar["valor_icms"].sum()
+                    st.warning(
+                        f"{len(preview_zerar)} item(ns) da NF {nf_sel_zerar}, CFOP {cfop_sel_zerar} — "
+                        f"{formatar_moeda(total_icms_atual)} de ICMS atual será zerado."
+                    )
+
+                    with st.form(f"form_zerar_{tipo_operacao}"):
+                        justificativa_zerar = st.text_area(
+                            "Justificativa (obrigatória)", key=f"just_zerar_{tipo_operacao}",
+                            placeholder="Ex: NF com isenção de ICMS conforme Convênio X, base e alíquota "
+                                        "não se aplicam.",
+                        )
+                        confirmar_zerar = st.form_submit_button(
+                            "🧹 Zerar base, alíquota e ICMS desta NF+CFOP"
+                        )
+                    if confirmar_zerar:
+                        if not justificativa_zerar.strip():
+                            st.error("Escreva a justificativa antes de zerar.")
+                        else:
+                            n_zerados = zerar_base_aliquota(
+                                session, cid, tipo_operacao, nf_sel_zerar, cfop_sel_zerar,
+                                justificativa_zerar.strip(), usuario=usuario_atual(),
+                            )
+                            with st.spinner("Recalculando inconsistências..."):
+                                gerar_inconsistencias_ncm(session, cid, empresa_id)
+                                gerar_inconsistencias_transferencia(session, cid, empresa_id)
+                                gerar_inconsistencias_ncm_tributado(session, cid, empresa_id)
+                            st.success(
+                                f"{n_zerados} item(ns) zerado(s) (base, alíquota e ICMS) na NF "
+                                f"{nf_sel_zerar}, CFOP {cfop_sel_zerar}."
+                            )
+                            st.rerun()
+
     with st.expander("📝 Histórico de ajustes manuais desta planilha (mais recentes primeiro)"):
         hist = carregar_historico_edicoes(session, cid, tipo_operacao)
         if hist.empty:
@@ -195,7 +268,7 @@ def _aba_planilha(tipo_operacao, titulo):
             st.dataframe(
                 hist, use_container_width=True, height=300,
                 column_order=["nf_item_id", "nf_numero", "produto_codigo", "campo", "valor_anterior",
-                              "valor_novo", "editado_por_email", "editado_em"],
+                              "valor_novo", "justificativa", "editado_por_email", "editado_em"],
                 column_config={
                     "nf_item_id": st.column_config.NumberColumn("ID Item"),
                     "nf_numero": st.column_config.TextColumn("NF"),
@@ -203,6 +276,7 @@ def _aba_planilha(tipo_operacao, titulo):
                     "campo": st.column_config.TextColumn("Campo alterado"),
                     "valor_anterior": st.column_config.TextColumn("Valor anterior"),
                     "valor_novo": st.column_config.TextColumn("Valor novo"),
+                    "justificativa": st.column_config.TextColumn("Justificativa", width="large"),
                     "editado_por_email": st.column_config.TextColumn("Editado por"),
                     "editado_em": st.column_config.DatetimeColumn("Quando", format="DD/MM/YYYY HH:mm"),
                 },
@@ -259,7 +333,16 @@ def _aba_planilha(tipo_operacao, titulo):
             diff_base=ref_editado["base_calc"] - ref_editado["base_1024"],
             diff_icms=ref_editado["icms_calc"] - ref_editado["icms_1024"],
         )
-        divergentes = diffs[(diffs["diff_base"].abs() > 0.05) | (diffs["diff_icms"].abs() > 0.05)]
+        divergentes_brutas = diffs[(diffs["diff_base"].abs() > 0.05) | (diffs["diff_icms"].abs() > 0.05)]
+
+        # CFOPs marcados na aba 🚫 CFOPs sem Validação (pedido do usuário em 06/08/2026, ex: CFOP 1602 —
+        # "lançado direto no sistema contábil, sem passar por nota fiscal", ou 1602-símile de transferência
+        # de saldo credor entre unidades) somem daqui também — o "calculado" desses CFOPs é sempre 0 (não
+        # vêm em nenhum relatório de NF), então SEMPRE vai divergir da Rotina 1024, mesmo estando certo.
+        cfops_excluidos_1024 = set(cfops_excluidos_validacao(session, empresa_id))
+        divergentes = divergentes_brutas[~divergentes_brutas["cfop"].isin(cfops_excluidos_1024)]
+        escondidos = divergentes_brutas[divergentes_brutas["cfop"].isin(cfops_excluidos_1024)]
+
         if not divergentes.empty:
             st.warning(f"{len(divergentes)} CFOP(s) com diferença acima de R$ 0,05:")
             st.dataframe(
@@ -267,8 +350,40 @@ def _aba_planilha(tipo_operacao, titulo):
                                     ["diff_base", "diff_icms"]),
                 use_container_width=True,
             )
+            with st.expander("🚫 Marcar algum desses CFOPs como 'sem validação'"):
+                st.caption(
+                    "Use para um CFOP que você já sabe que é certo assim mesmo (ex: lançado direto no "
+                    "contábil, transferência de saldo credor entre unidades) — some da lista acima e das "
+                    "inconsistências automáticas (aba 🚫 CFOPs sem Validação) de agora em diante."
+                )
+                c_cfop_q, c_motivo_q, c_btn_q = st.columns([1, 3, 1])
+                cfop_marcar = c_cfop_q.selectbox("CFOP", divergentes["cfop"].tolist(),
+                                                  key=f"marcar_sv_1024_{tipo_operacao}")
+                motivo_marcar = c_motivo_q.text_input(
+                    "Motivo", key=f"motivo_sv_1024_{tipo_operacao}",
+                    placeholder="ex: transferência de crédito entre unidades",
+                )
+                if c_btn_q.button("Marcar", key=f"btn_marcar_sv_1024_{tipo_operacao}"):
+                    atual = listar_cfops_sem_validacao(session, empresa_id)
+                    nova_linha = pd.DataFrame([{
+                        "id": None, "cfop": cfop_marcar, "descricao": None,
+                        "motivo": motivo_marcar or None, "criado_por_email": None, "created_at": None,
+                    }])
+                    salvar_cfops_sem_validacao(
+                        session, empresa_id, atual, pd.concat([atual, nova_linha], ignore_index=True),
+                        usuario=usuario_atual(),
+                    )
+                    st.success(f"CFOP {cfop_marcar} marcado como sem validação.")
+                    st.rerun()
         elif ref_editado["base_1024"].notna().any():
-            st.success("Tudo bateu com os valores da Rotina 1024 informados.")
+            st.success("Tudo bateu com os valores da Rotina 1024 informados "
+                       "(fora os CFOPs marcados como sem validação, se houver).")
+
+        if not escondidos.empty:
+            st.caption(
+                f"{len(escondidos)} CFOP(s) com diferença ignorados aqui por estarem marcados como 'sem "
+                f"validação' (aba 🚫 CFOPs sem Validação): {', '.join(str(c) for c in escondidos['cfop'])}."
+            )
 
 
 with aba_entrada:
