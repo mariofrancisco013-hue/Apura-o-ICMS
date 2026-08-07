@@ -226,8 +226,9 @@ def listar_nfs_disponiveis(session, competencia_id, tipo_operacao):
 
 
 def listar_cfops_da_nf(session, competencia_id, tipo_operacao, nf_numero):
-    """CFOPs distintos usados por uma NF específica — o 'Zerar Base/Alíquota' é sempre por NF+CFOP, nunca a
-    NF inteira, porque uma mesma NF pode ter itens em CFOPs diferentes (nem todos precisam ser zerados)."""
+    """CFOPs distintos usados por uma NF específica — para o modo 'Uma NF específica' do 'Zerar
+    Base/Alíquota', já que uma mesma NF pode ter itens em CFOPs diferentes (nem todos precisam ser
+    zerados)."""
     return session.execute(text("""
         select distinct cfop from notas_fiscais_itens
         where competencia_id = :cid and tipo_operacao = :tipo and nf_numero = :nf
@@ -235,35 +236,65 @@ def listar_cfops_da_nf(session, competencia_id, tipo_operacao, nf_numero):
     """), {"cid": competencia_id, "tipo": tipo_operacao, "nf": nf_numero}).scalars().all()
 
 
-def previsualizar_zerar_base_aliquota(session, competencia_id, tipo_operacao, nf_numero, cfop):
+def listar_cfops_disponiveis(session, competencia_id, tipo_operacao):
+    """Todos os CFOPs distintos desta competência/tipo — para o modo 'Todas as NFs deste CFOP' do 'Zerar
+    Base/Alíquota' (pedido do usuário em 07/08/2026: "se eu quiser puxar só o CFOP ele tem que trazer",
+    sem depender de escolher uma NF antes quando o ajuste vale pro CFOP inteiro)."""
+    return session.execute(text("""
+        select distinct cfop from notas_fiscais_itens
+        where competencia_id = :cid and tipo_operacao = :tipo
+        order by cfop
+    """), {"cid": competencia_id, "tipo": tipo_operacao}).scalars().all()
+
+
+def previsualizar_zerar_base_aliquota(session, competencia_id, tipo_operacao, cfop, nf_numero=None):
     """Itens que seriam afetados por `zerar_base_aliquota`, com os valores ATUAIS — mostrado ao analista
-    antes de confirmar, já que é uma ação em lote (afeta todos os itens da NF+CFOP de uma vez)."""
-    rows = session.execute(text("""
-        select id, produto_codigo, produto_descricao, ncm, valor_produto, aliq_icms, base_icms, valor_icms
+    antes de confirmar, já que é uma ação em lote. `nf_numero=None` mostra TODOS os itens desse CFOP na
+    competência (todas as NFs); informado, filtra só aquela NF."""
+    where = ["competencia_id = :cid", "tipo_operacao = :tipo", "cfop = :cfop"]
+    params = {"cid": competencia_id, "tipo": tipo_operacao, "cfop": cfop}
+    if nf_numero:
+        where.append("nf_numero = :nf")
+        params["nf"] = nf_numero
+    where_sql = " and ".join(where)
+
+    rows = session.execute(text(f"""
+        select id, nf_numero, produto_codigo, produto_descricao, ncm, valor_produto, aliq_icms, base_icms,
+               valor_icms
         from notas_fiscais_itens
-        where competencia_id = :cid and tipo_operacao = :tipo and nf_numero = :nf and cfop = :cfop
-        order by id
-    """), {"cid": competencia_id, "tipo": tipo_operacao, "nf": nf_numero, "cfop": cfop}).mappings().all()
+        where {where_sql}
+        order by nf_numero, id
+    """), params).mappings().all()
     return pd.DataFrame(rows, columns=[
-        "id", "produto_codigo", "produto_descricao", "ncm", "valor_produto", "aliq_icms", "base_icms",
-        "valor_icms",
+        "id", "nf_numero", "produto_codigo", "produto_descricao", "ncm", "valor_produto", "aliq_icms",
+        "base_icms", "valor_icms",
     ])
 
 
-def zerar_base_aliquota(session, competencia_id, tipo_operacao, nf_numero, cfop, justificativa, usuario=None):
-    """Zera base_icms, aliq_icms e valor_icms de TODOS os itens de uma NF+CFOP nesta competência de uma vez
-    só — pedido do usuário em 06/08/2026: "criar uma forma de selecionar a nota, o cfop e zerar a base de
-    cálculo e a alíquota com uma justificativa", para quando um lançamento não deveria gerar débito/crédito
-    de ICMS (ex: isenção, situação tributária que zera a tributação daquele CFOP), sem precisar editar item
-    a item na grade quando a NF tem muitas linhas.
+def zerar_base_aliquota(session, competencia_id, tipo_operacao, cfop, justificativa, nf_numero=None,
+                         usuario=None):
+    """Zera base_icms, aliq_icms e valor_icms de itens desta competência/CFOP de uma vez só — pedido do
+    usuário em 06/08/2026: "criar uma forma de selecionar a nota, o cfop e zerar a base de cálculo e a
+    alíquota com uma justificativa", para quando um lançamento não deveria gerar débito/crédito de ICMS
+    (ex: isenção, situação tributária que zera a tributação daquele CFOP), sem precisar editar item a item
+    na grade.
+
+    `nf_numero=None` (padrão) aplica a TODAS as NFs desse CFOP na competência — pedido em 07/08/2026, pra
+    quando o ajuste vale pro CFOP inteiro, não só uma nota. Informe `nf_numero` pra restringir a uma NF só.
 
     Grava no mesmo histórico de `salvar_itens_editados` (auditoria_edicoes_planilha), com a justificativa
     preenchida em cada linha — itens que já estavam zerados nesses 3 campos não geram entrada duplicada no
-    histórico. Retorna quantos itens foram afetados (0 se a combinação NF+CFOP não existir)."""
-    itens = session.execute(text("""
-        select id, aliq_icms, base_icms, valor_icms from notas_fiscais_itens
-        where competencia_id = :cid and tipo_operacao = :tipo and nf_numero = :nf and cfop = :cfop
-    """), {"cid": competencia_id, "tipo": tipo_operacao, "nf": nf_numero, "cfop": cfop}).mappings().all()
+    histórico. Retorna quantos itens foram afetados (0 se não houver item pra essa combinação)."""
+    where = ["competencia_id = :cid", "tipo_operacao = :tipo", "cfop = :cfop"]
+    params = {"cid": competencia_id, "tipo": tipo_operacao, "cfop": cfop}
+    if nf_numero:
+        where.append("nf_numero = :nf")
+        params["nf"] = nf_numero
+    where_sql = " and ".join(where)
+
+    itens = session.execute(text(f"""
+        select id, aliq_icms, base_icms, valor_icms from notas_fiscais_itens where {where_sql}
+    """), params).mappings().all()
     if not itens:
         return 0
 
@@ -290,10 +321,9 @@ def zerar_base_aliquota(session, competencia_id, tipo_operacao, nf_numero, cfop,
             "auditoria_edicoes_planilha", session.bind, if_exists="append", index=False
         )
 
-    session.execute(text("""
-        update notas_fiscais_itens set base_icms = 0, aliq_icms = 0, valor_icms = 0
-        where competencia_id = :cid and tipo_operacao = :tipo and nf_numero = :nf and cfop = :cfop
-    """), {"cid": competencia_id, "tipo": tipo_operacao, "nf": nf_numero, "cfop": cfop})
+    session.execute(text(f"""
+        update notas_fiscais_itens set base_icms = 0, aliq_icms = 0, valor_icms = 0 where {where_sql}
+    """), params)
     session.commit()
     return len(itens)
 

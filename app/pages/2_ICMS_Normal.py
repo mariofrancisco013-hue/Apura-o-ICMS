@@ -10,7 +10,7 @@ from lib.planilha import (
     carregar_itens, salvar_itens_editados, resumo_por_cfop, carregar_totalizador,
     carregar_checkpoint_1024_editavel, salvar_checkpoint_1024_bulk,
     carregar_checkpoint_1025_editavel, salvar_checkpoint_1025_bulk, LABELS_INCONSISTENCIA,
-    carregar_historico_edicoes, listar_nfs_disponiveis, listar_cfops_da_nf,
+    carregar_historico_edicoes, listar_nfs_disponiveis, listar_cfops_da_nf, listar_cfops_disponiveis,
     previsualizar_zerar_base_aliquota, zerar_base_aliquota,
 )
 from lib.calculo_icms_normal import calcular_apuracao_icms_normal, salvar_apuracao
@@ -190,75 +190,98 @@ def _aba_planilha(tipo_operacao, titulo):
                 st.info("Nenhuma mudança detectada.")
             st.rerun()
 
-    with st.expander("🧹 Zerar Base de Cálculo e Alíquota de uma NF + CFOP"):
+    with st.expander("🧹 Zerar Base de Cálculo e Alíquota"):
         st.caption(
-            "Para quando um lançamento (NF + CFOP inteiro) não deveria gerar débito/crédito de ICMS nesta "
-            "competência (ex: isenção, situação tributária que zera a tributação) — zera base_icms, "
-            "aliq_icms e valor_icms de TODOS os itens dessa NF+CFOP de uma vez, com justificativa "
-            "obrigatória, em vez de editar item a item na grade. Fica registrado no histórico logo abaixo."
+            "Para quando um lançamento não deveria gerar débito/crédito de ICMS nesta competência (ex: "
+            "isenção, situação tributária que zera a tributação) — zera base_icms, aliq_icms e valor_icms "
+            "de uma vez, com justificativa obrigatória, em vez de editar item a item na grade. Escolha se "
+            "é só uma NF específica ou o CFOP inteiro (todas as NFs). Fica registrado no histórico abaixo."
         )
-        nfs_disp = listar_nfs_disponiveis(session, cid, tipo_operacao)
-        if not nfs_disp:
-            st.caption("Nenhuma NF importada nesta competência.")
-        else:
-            c_nf, c_cfop = st.columns(2)
-            nf_sel_zerar = c_nf.selectbox("NF", nfs_disp, key=f"zerar_nf_{tipo_operacao}")
-            cfops_da_nf = listar_cfops_da_nf(session, cid, tipo_operacao, nf_sel_zerar) if nf_sel_zerar else []
+        modo_zerar = st.radio(
+            "Aplicar em", ["Uma NF específica + CFOP", "Todas as NFs deste CFOP"],
+            horizontal=True, key=f"modo_zerar_{tipo_operacao}",
+        )
+        modo_todas_nfs = modo_zerar.startswith("Todas")
+
+        nf_sel_zerar = None
+        cfop_sel_zerar = None
+        if modo_todas_nfs:
+            cfops_disp = listar_cfops_disponiveis(session, cid, tipo_operacao)
             cfop_sel_zerar = (
-                c_cfop.selectbox("CFOP", cfops_da_nf, key=f"zerar_cfop_{tipo_operacao}")
-                if cfops_da_nf else None
+                st.selectbox("CFOP", cfops_disp, key=f"zerar_cfop_todas_{tipo_operacao}")
+                if cfops_disp else None
             )
-
-            if cfop_sel_zerar is not None:
-                preview_zerar = previsualizar_zerar_base_aliquota(
-                    session, cid, tipo_operacao, nf_sel_zerar, cfop_sel_zerar
+            if not cfops_disp:
+                st.caption("Nenhuma NF importada nesta competência.")
+        else:
+            nfs_disp = listar_nfs_disponiveis(session, cid, tipo_operacao)
+            if not nfs_disp:
+                st.caption("Nenhuma NF importada nesta competência.")
+            else:
+                c_nf, c_cfop = st.columns(2)
+                nf_sel_zerar = c_nf.selectbox("NF", nfs_disp, key=f"zerar_nf_{tipo_operacao}")
+                cfops_da_nf = (
+                    listar_cfops_da_nf(session, cid, tipo_operacao, nf_sel_zerar) if nf_sel_zerar else []
                 )
-                if preview_zerar.empty:
-                    st.caption("Nenhum item encontrado para essa combinação.")
-                else:
-                    st.dataframe(
-                        _formatar_moeda_df(preview_zerar, ["valor_produto", "base_icms", "valor_icms"]),
-                        use_container_width=True,
-                        column_config={
-                            "id": st.column_config.NumberColumn("ID"),
-                            "produto_codigo": st.column_config.TextColumn("Código Produto"),
-                            "produto_descricao": st.column_config.TextColumn("Descrição Produto"),
-                            "ncm": st.column_config.TextColumn("NCM"),
-                            "aliq_icms": st.column_config.NumberColumn("Alíquota atual %"),
-                        },
-                    )
-                    total_icms_atual = preview_zerar["valor_icms"].sum()
-                    st.warning(
-                        f"{len(preview_zerar)} item(ns) da NF {nf_sel_zerar}, CFOP {cfop_sel_zerar} — "
-                        f"{formatar_moeda(total_icms_atual)} de ICMS atual será zerado."
-                    )
+                cfop_sel_zerar = (
+                    c_cfop.selectbox("CFOP", cfops_da_nf, key=f"zerar_cfop_{tipo_operacao}")
+                    if cfops_da_nf else None
+                )
 
-                    with st.form(f"form_zerar_{tipo_operacao}"):
-                        justificativa_zerar = st.text_area(
-                            "Justificativa (obrigatória)", key=f"just_zerar_{tipo_operacao}",
-                            placeholder="Ex: NF com isenção de ICMS conforme Convênio X, base e alíquota "
-                                        "não se aplicam.",
+        if cfop_sel_zerar is not None:
+            preview_zerar = previsualizar_zerar_base_aliquota(
+                session, cid, tipo_operacao, cfop_sel_zerar, nf_numero=nf_sel_zerar
+            )
+            if preview_zerar.empty:
+                st.caption("Nenhum item encontrado para essa combinação.")
+            else:
+                nf_col = ["nf_numero"] if modo_todas_nfs else []
+                st.dataframe(
+                    _formatar_moeda_df(preview_zerar, ["valor_produto", "base_icms", "valor_icms"]),
+                    use_container_width=True,
+                    column_order=["id"] + nf_col + ["produto_codigo", "produto_descricao", "ncm",
+                                                     "valor_produto", "aliq_icms", "base_icms", "valor_icms"],
+                    column_config={
+                        "id": st.column_config.NumberColumn("ID"),
+                        "nf_numero": st.column_config.TextColumn("NF"),
+                        "produto_codigo": st.column_config.TextColumn("Código Produto"),
+                        "produto_descricao": st.column_config.TextColumn("Descrição Produto"),
+                        "ncm": st.column_config.TextColumn("NCM"),
+                        "aliq_icms": st.column_config.NumberColumn("Alíquota atual %"),
+                    },
+                )
+                total_icms_atual = preview_zerar["valor_icms"].sum()
+                n_nfs = preview_zerar["nf_numero"].nunique()
+                alvo_txt = (
+                    f"{n_nfs} NF(s), CFOP {cfop_sel_zerar}" if modo_todas_nfs
+                    else f"NF {nf_sel_zerar}, CFOP {cfop_sel_zerar}"
+                )
+                st.warning(
+                    f"{len(preview_zerar)} item(ns) — {alvo_txt} — "
+                    f"{formatar_moeda(total_icms_atual)} de ICMS atual será zerado."
+                )
+
+                with st.form(f"form_zerar_{tipo_operacao}"):
+                    justificativa_zerar = st.text_area(
+                        "Justificativa (obrigatória)", key=f"just_zerar_{tipo_operacao}",
+                        placeholder="Ex: NF com isenção de ICMS conforme Convênio X, base e alíquota "
+                                    "não se aplicam.",
+                    )
+                    confirmar_zerar = st.form_submit_button("🧹 Zerar base, alíquota e ICMS")
+                if confirmar_zerar:
+                    if not justificativa_zerar.strip():
+                        st.error("Escreva a justificativa antes de zerar.")
+                    else:
+                        n_zerados = zerar_base_aliquota(
+                            session, cid, tipo_operacao, cfop_sel_zerar, justificativa_zerar.strip(),
+                            nf_numero=nf_sel_zerar, usuario=usuario_atual(),
                         )
-                        confirmar_zerar = st.form_submit_button(
-                            "🧹 Zerar base, alíquota e ICMS desta NF+CFOP"
-                        )
-                    if confirmar_zerar:
-                        if not justificativa_zerar.strip():
-                            st.error("Escreva a justificativa antes de zerar.")
-                        else:
-                            n_zerados = zerar_base_aliquota(
-                                session, cid, tipo_operacao, nf_sel_zerar, cfop_sel_zerar,
-                                justificativa_zerar.strip(), usuario=usuario_atual(),
-                            )
-                            with st.spinner("Recalculando inconsistências..."):
-                                gerar_inconsistencias_ncm(session, cid, empresa_id)
-                                gerar_inconsistencias_transferencia(session, cid, empresa_id)
-                                gerar_inconsistencias_ncm_tributado(session, cid, empresa_id)
-                            st.success(
-                                f"{n_zerados} item(ns) zerado(s) (base, alíquota e ICMS) na NF "
-                                f"{nf_sel_zerar}, CFOP {cfop_sel_zerar}."
-                            )
-                            st.rerun()
+                        with st.spinner("Recalculando inconsistências..."):
+                            gerar_inconsistencias_ncm(session, cid, empresa_id)
+                            gerar_inconsistencias_transferencia(session, cid, empresa_id)
+                            gerar_inconsistencias_ncm_tributado(session, cid, empresa_id)
+                        st.success(f"{n_zerados} item(ns) zerado(s) (base, alíquota e ICMS) — {alvo_txt}.")
+                        st.rerun()
 
     with st.expander("📝 Histórico de ajustes manuais desta planilha (mais recentes primeiro)"):
         hist = carregar_historico_edicoes(session, cid, tipo_operacao)
