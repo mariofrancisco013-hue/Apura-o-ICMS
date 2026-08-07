@@ -17,6 +17,7 @@ from lib.validacoes import gerar_inconsistencias_ncm, gerar_inconsistencias_tran
 from lib.ncm_tributado import (
     listar_ncms_tributados, salvar_ncms_tributados, gerar_inconsistencias_ncm_tributado,
 )
+from lib.cfops_sem_validacao import listar_cfops_sem_validacao, salvar_cfops_sem_validacao
 from lib.importar_1024 import parse_rotina_1024
 from lib.formatacao import formatar_moeda, coluna_moeda
 from lib.status_apuracao import status_competencia
@@ -49,9 +50,10 @@ empresa_id = comp["empresa_id"]
 _status = status_competencia(session, cid, comp["status"])
 {"success": st.success, "warning": st.warning, "info": st.info}[_status["nivel"]](_status["texto"])
 
-aba_entrada, aba_saida, aba_ncm, aba_ajustes, aba_apuracao, aba_inconsistencias = st.tabs([
+(aba_entrada, aba_saida, aba_ncm, aba_cfop_sem_validacao, aba_ajustes, aba_apuracao,
+ aba_inconsistencias) = st.tabs([
     "📥 Planilha de Entrada", "📤 Planilha de Saída", "🔖 NCMs Tributados",
-    "🧮 Ajustes na Apuração", "📋 Apuração", "⚠️ Inconsistências",
+    "🚫 CFOPs sem Validação", "🧮 Ajustes na Apuração", "📋 Apuração", "⚠️ Inconsistências",
 ])
 
 
@@ -318,6 +320,44 @@ with aba_ncm:
         st.success(f"{resultado['incluidos']} incluído(s), {resultado['removidos']} removido(s).")
         st.rerun()
 
+with aba_cfop_sem_validacao:
+    st.markdown(
+        "**Para que serve esta aba:** se um CFOP dispara inconsistência recorrente por um motivo que você "
+        "já conhece e não é erro de verdade (ex: um CFOP usado só num caso muito específico da operação), "
+        "marque ele aqui em vez de justificar a mesma inconsistência todo mês."
+    )
+    st.caption(
+        "Itens desse CFOP deixam de entrar nas 3 validações automáticas (NCM×ST divergente, transferência "
+        "não vinculada, NCM tributado como ST/novo) — tanto nesta competência quanto nas futuras, até você "
+        "remover o cadastro. Não afeta a Planilha nem os valores da Apuração, só as validações. Cadastro "
+        "por empresa, igual a aba NCMs Tributados."
+    )
+
+    cfops_sv_df = listar_cfops_sem_validacao(session, empresa_id)
+    st.caption(f"{len(cfops_sv_df)} CFOP(s) marcado(s) como sem validação para {comp['razao_social']}.")
+    cfops_sv_editado = st.data_editor(
+        cfops_sv_df, use_container_width=True, num_rows="dynamic", key="editor_cfops_sem_validacao",
+        column_config={
+            "id": st.column_config.NumberColumn("ID", disabled=True),
+            "cfop": st.column_config.NumberColumn("CFOP", required=True),
+            "descricao": st.column_config.TextColumn("Descrição do CFOP", disabled=True, width="large"),
+            "motivo": st.column_config.TextColumn("Motivo (opcional)", width="large"),
+            "criado_por_email": st.column_config.TextColumn("Cadastrado por", disabled=True),
+            "created_at": st.column_config.DatetimeColumn("Cadastrado em", disabled=True),
+        },
+        column_order=["cfop", "descricao", "motivo", "criado_por_email", "created_at", "id"],
+    )
+    st.caption("Para incluir: adicione uma linha nova (ícone + no final da grade) e digite o CFOP. "
+               "Para remover (volta a validar normalmente): selecione a linha e apague (ícone de lixeira). "
+               "Depois clique em Salvar.")
+    if st.button("💾 Salvar CFOPs sem validação"):
+        resultado = salvar_cfops_sem_validacao(session, empresa_id, cfops_sv_df, cfops_sv_editado,
+                                                usuario=usuario_atual())
+        st.success(f"{resultado['incluidos']} incluído(s), {resultado['removidos']} removido(s). Clique em "
+                   f"'Calcular apuração' (aba Apuração) ou salve qualquer edição na Planilha para as "
+                   f"validações refletirem a mudança.")
+        st.rerun()
+
 with aba_ajustes:
     st.markdown(
         "**Direcionador de ajustes manuais desta competência.** Cada lançamento aqui é uma informação que "
@@ -459,10 +499,11 @@ with aba_inconsistencias:
         "manualmente). NCM tributado como ST: um NCM cadastrado como 'tributado' na aba NCMs Tributados "
         "apareceu num item classificado como ST. NCM tributado novo: um NCM ainda não cadastrado apareceu "
         "como tributado (não-ST) — candidato a entrar na lista. Geradas ao clicar em 'Calcular apuração' "
-        "na aba Apuração. Ocorrências do mesmo erro (mesmo NCM, ou mesmo parceiro+CFOP) aparecem "
-        "AGRUPADAS numa linha só, com a quantidade de itens de NF por trás — revisar/ignorar/justificar o "
-        "grupo já vale para todos os itens dele de uma vez. Cada item afetado também fica sinalizado "
-        "direto na Planilha de Entrada/Saída (coluna ⚠️ Inconsistência)."
+        "na aba Apuração, ou automaticamente ao salvar uma edição na Planilha. Ocorrências do mesmo erro "
+        "(mesmo NCM, ou mesmo parceiro+CFOP) aparecem AGRUPADAS numa linha só, com a quantidade de itens "
+        "de NF por trás — revisar/ignorar/justificar o grupo já vale para todos os itens dele de uma vez. "
+        "Cada item afetado também fica sinalizado direto na Planilha de Entrada/Saída (coluna ⚠️ "
+        "Inconsistência). CFOP que não deve entrar nessas checagens: aba 🚫 CFOPs sem Validação."
     )
 
     TIPOS_INCONSISTENCIA = [

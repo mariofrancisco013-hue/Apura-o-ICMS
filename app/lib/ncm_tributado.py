@@ -14,6 +14,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from lib.inconsistencias_util import gravar_grupos
+from lib.cfops_sem_validacao import cfops_excluidos_validacao
 
 
 def listar_ncms_tributados(session, empresa_id: int) -> pd.DataFrame:
@@ -70,12 +71,17 @@ def gerar_inconsistencias_ncm_tributado(session, competencia_id: int, empresa_id
     """), {"cid": competencia_id})
     session.commit()  # fecha a transação do delete antes do bulk insert (que usa outra conexão do pool)
 
+    # CFOPs marcados como "não precisa validar" (pedido em 06/08/2026, ver lib/cfops_sem_validacao.py) —
+    # itens desses CFOPs nem entram na checagem.
+    cfops_excluidos = cfops_excluidos_validacao(session, empresa_id) if empresa_id else []
+
     itens = session.execute(text("""
         select ni.id, ni.ncm, ni.cfop, ce.is_st
         from notas_fiscais_itens ni
         join cfop_efetivo ce on ce.codigo = ni.cfop
         where ni.competencia_id = :cid and ni.ncm is not null and ce.is_transferencia = false
-    """), {"cid": competencia_id}).mappings().all()
+          and not (ni.cfop = any(:cfops_excluidos))
+    """), {"cid": competencia_id, "cfops_excluidos": cfops_excluidos}).mappings().all()
 
     # Monta os grupos em memória (Python puro, sem ida ao banco) e insere tudo de uma vez no fim — achado
     # em 06/08/2026: com um INSERT síncrono por item classificado, "Calcular apuração" ficava lento em

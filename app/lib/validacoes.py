@@ -20,13 +20,20 @@ cada função monta um dict {chave_agrupamento: {...,"item_ids": [...]}} — uma
 do erro (por NCM, ou por parceiro+CFOP) — e delega a gravação para `inconsistencias_util.gravar_grupos`,
 que insere o resumo em `inconsistencias` (com `quantidade` = nº de itens) e o vínculo item a item em
 `inconsistencia_itens` (usado pela Planilha de Entrada/Saída para sinalizar a linha certa na grade — ver
-sql/008_agrupar_inconsistencias.sql)."""
+sql/008_agrupar_inconsistencias.sql).
+
+CFOPs SEM VALIDAÇÃO (pedido do usuário em 06/08/2026: "crie uma forma que eu consiga indicar CFOP que não
+precisa de validação"): antes de rodar a checagem, cada função busca em `cfops_sem_validacao` (aba "🚫
+CFOPs sem Validação", ver app/lib/cfops_sem_validacao.py) os CFOPs marcados pelo analista para esta empresa
+e exclui os itens desses CFOPs da consulta — eles simplesmente não entram na checagem, nem geram
+inconsistência nem contam pra estatística."""
 import re
 from collections import defaultdict
 
 from sqlalchemy import text
 
 from lib.inconsistencias_util import gravar_grupos
+from lib.cfops_sem_validacao import cfops_excluidos_validacao
 
 
 def _normaliza_nome(s: str) -> str:
@@ -52,12 +59,17 @@ def gerar_inconsistencias_ncm(session, competencia_id: int, empresa_id: int = No
     """), {"cid": competencia_id})
     session.commit()  # fecha a transação do delete antes do bulk insert (que usa outra conexão do pool)
 
+    # CFOPs marcados como "não precisa validar" (pedido em 06/08/2026) — itens com esses CFOPs nem entram
+    # na comparação ST Entrada x Saída.
+    cfops_excluidos = cfops_excluidos_validacao(session, empresa_id) if empresa_id else []
+
     rows = session.execute(text("""
         select ni.tipo_operacao, ni.ncm, ni.id, ce.is_st
         from notas_fiscais_itens ni
         join cfop_efetivo ce on ce.codigo = ni.cfop
         where ni.competencia_id = :cid and ce.is_transferencia = false and ni.ncm is not null
-    """), {"cid": competencia_id}).mappings().all()
+          and not (ni.cfop = any(:cfops_excluidos))
+    """), {"cid": competencia_id, "cfops_excluidos": cfops_excluidos}).mappings().all()
 
     entrada_st = defaultdict(set)      # ncm -> {True, False} conforme aparece na entrada
     saida_st = defaultdict(set)
@@ -97,6 +109,8 @@ def gerar_inconsistencias_transferencia(session, competencia_id: int, empresa_id
     """), {"cid": competencia_id})
     session.commit()  # fecha a transação do delete antes do bulk insert (que usa outra conexão do pool)
 
+    cfops_excluidos = cfops_excluidos_validacao(session, empresa_id) if empresa_id else []
+
     empresas = session.execute(text("select razao_social from empresas")).scalars().all()
     nomes_grupo = [_normaliza_nome(e) for e in empresas]
 
@@ -105,7 +119,8 @@ def gerar_inconsistencias_transferencia(session, competencia_id: int, empresa_id
         from notas_fiscais_itens ni
         join cfop_efetivo ce on ce.codigo = ni.cfop
         where ni.competencia_id = :cid and ce.is_transferencia = true
-    """), {"cid": competencia_id}).mappings().all()
+          and not (ni.cfop = any(:cfops_excluidos))
+    """), {"cid": competencia_id, "cfops_excluidos": cfops_excluidos}).mappings().all()
 
     brutos = {}  # chave "parceiro_normalizado|cfop" -> {"cfop", "parceiro", "primeira_nf", "item_ids"}
     for it in itens:
