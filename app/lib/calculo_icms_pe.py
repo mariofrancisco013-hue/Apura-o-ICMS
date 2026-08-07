@@ -89,27 +89,50 @@ def carregar_checkpoint_1024_pe(session, competencia_id: int):
 
 
 # ============================================================================================
-# LINHA 4.1.01 — a única que precisa de entrada manual (ver docstring do módulo). Guardada em
-# checkpoints_referencia com fonte='manual_pe', linha='4.1.01', valor_icms=valor digitado.
+# ENTRADAS MANUAIS (override) — três linhas que podem ser digitadas na tela em vez de vir calculado:
+# - "4.1.01": a única que NÃO tem fonte automática confiável (ver docstring do módulo).
+# - "1.2"/"1.3": normalmente vêm encadeadas da competência anterior (ver competencia_anterior_id), mas o
+#   analista pode sobrescrever — necessário, por exemplo, na primeira competência cadastrada no sistema
+#   pra essa empresa (não tem "mês anterior" aqui dentro pra encadear, mas o valor recolhido existe de
+#   verdade fora do sistema) ou pra corrigir um encadeamento que ficou errado. Pedido do usuário em
+#   07/08/2026. Todas guardadas em checkpoints_referencia com fonte='manual_pe', linha=<código>,
+#   valor_icms=valor digitado — mesmo padrão da fonte 'rotina_1025'.
 # ============================================================================================
 
-def carregar_valor_4101_manual(session, competencia_id: int):
+def carregar_valor_manual_pe(session, competencia_id: int, linha: str):
     v = session.execute(text("""
         select valor_icms from checkpoints_referencia
-        where competencia_id = :cid and fonte = 'manual_pe' and linha = '4.1.01'
-    """), {"cid": competencia_id}).scalar()
+        where competencia_id = :cid and fonte = 'manual_pe' and linha = :linha
+    """), {"cid": competencia_id, "linha": linha}).scalar()
     return _to_decimal(v) if v is not None else None
 
 
-def salvar_valor_4101_manual(session, competencia_id: int, valor) -> None:
+def salvar_valor_manual_pe(session, competencia_id: int, linha: str, valor) -> None:
     session.execute(text(
-        "delete from checkpoints_referencia where competencia_id = :cid and fonte = 'manual_pe' and linha = '4.1.01'"
-    ), {"cid": competencia_id})
+        "delete from checkpoints_referencia where competencia_id = :cid and fonte = 'manual_pe' and linha = :linha"
+    ), {"cid": competencia_id, "linha": linha})
     session.execute(text("""
         insert into checkpoints_referencia (competencia_id, fonte, linha, valor_icms)
-        values (:cid, 'manual_pe', '4.1.01', :valor)
-    """), {"cid": competencia_id, "valor": float(valor)})
+        values (:cid, 'manual_pe', :linha, :valor)
+    """), {"cid": competencia_id, "linha": linha, "valor": float(valor)})
     session.commit()
+
+
+def remover_valor_manual_pe(session, competencia_id: int, linha: str) -> None:
+    """Apaga o override manual desta linha — volta a usar o valor calculado/encadeado automaticamente."""
+    session.execute(text(
+        "delete from checkpoints_referencia where competencia_id = :cid and fonte = 'manual_pe' and linha = :linha"
+    ), {"cid": competencia_id, "linha": linha})
+    session.commit()
+
+
+# Aliases específicos da 4.1.01, mantidos porque já são usados na tela (app/pages/3_ICMS_PE.py).
+def carregar_valor_4101_manual(session, competencia_id: int):
+    return carregar_valor_manual_pe(session, competencia_id, "4.1.01")
+
+
+def salvar_valor_4101_manual(session, competencia_id: int, valor) -> None:
+    salvar_valor_manual_pe(session, competencia_id, "4.1.01", valor)
 
 
 # ============================================================================================
@@ -183,14 +206,20 @@ def sugerir_valor_4101(session, competencia_id: int) -> Decimal:
 
 
 def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int, mes: int,
-                          valor_4101_manual=None) -> list[LinhaApuracao]:
+                          valor_4101_manual=None, valor_1_2_manual=None, valor_1_3_manual=None) -> list[LinhaApuracao]:
     """Calcula todas as linhas da Apuração ICMS PE (Crédito Presumido) para uma competência. Não grava no
     banco — quem chama decide se persiste (ver salvar_apuracao, reaproveitado de calculo_icms_normal).
 
     `valor_4101_manual`: valor digitado pelo analista pra linha 4.1.01 (ver sugerir_valor_4101). Se None,
     tenta carregar o que já foi salvo (carregar_valor_4101_manual); se também não houver, usa a sugestão
     calculada (sugerir_valor_4101) — nesse caso o resultado da linha 4. fica sujeito à imprecisão descrita
-    lá."""
+    lá.
+
+    `valor_1_2_manual`/`valor_1_3_manual`: override manual das linhas 1.2/1.3 (créditos de antecipação do
+    mês anterior — ver competencia_anterior_id). Por padrão essas linhas são encadeadas automaticamente da
+    competência anterior já calculada no sistema; passe um valor aqui (ou salve com salvar_valor_manual_pe)
+    pra sobrescrever — necessário, por exemplo, na primeira competência cadastrada pra essa empresa, onde
+    não existe "mês anterior" dentro do sistema pra encadear."""
     entrada = _cfops_presentes(session, competencia_id, (1, 2, 3))
     saida = _cfops_presentes(session, competencia_id, (5, 6, 7))
     buckets = cfops_por_bucket(session, empresa_id)  # {"interna": [cfop,...], "externa": [cfop,...]}
@@ -220,8 +249,22 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
     linha_1_1 = total_credito_entrada - linha_1_4 - linha_1_5    # "Créditos Entradas - Devoluções"
 
     comp_ant_id = competencia_anterior_id(session, empresa_id, ano, mes)
-    linha_1_2 = _valor_linha(session, comp_ant_id, "3.1") if comp_ant_id else Decimal("0")
-    linha_1_3 = _valor_linha(session, comp_ant_id, "3.2") if comp_ant_id else Decimal("0")
+
+    if valor_1_2_manual is None:
+        valor_1_2_manual = carregar_valor_manual_pe(session, competencia_id, "1.2")
+    if valor_1_2_manual is not None:
+        linha_1_2, origem_1_2 = _to_decimal(valor_1_2_manual), "manual"
+    else:
+        linha_1_2 = _valor_linha(session, comp_ant_id, "3.1") if comp_ant_id else Decimal("0")
+        origem_1_2 = "encadeado_competencia_anterior" if comp_ant_id else "sem_competencia_anterior"
+
+    if valor_1_3_manual is None:
+        valor_1_3_manual = carregar_valor_manual_pe(session, competencia_id, "1.3")
+    if valor_1_3_manual is not None:
+        linha_1_3, origem_1_3 = _to_decimal(valor_1_3_manual), "manual"
+    else:
+        linha_1_3 = _valor_linha(session, comp_ant_id, "3.2") if comp_ant_id else Decimal("0")
+        origem_1_3 = "encadeado_competencia_anterior" if comp_ant_id else "sem_competencia_anterior"
 
     linha_1 = linha_1_1 + linha_1_2 + linha_1_3 + linha_1_4 + linha_1_5
 
@@ -274,9 +317,9 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
                         "menos_devolucao_nao_st": _fmt(dev_entrada_nao_st),
                         "menos_devolucao_st": _fmt(dev_entrada_st)}),
         LinhaApuracao("1.2", "Crédito 1,1% recolhido no mês anterior", linha_1_2,
-                       {"competencia_anterior_id": comp_ant_id}),
+                       {"origem": origem_1_2, "competencia_anterior_id": comp_ant_id}),
         LinhaApuracao("1.3", "Crédito 6% recolhido no mês anterior", linha_1_3,
-                       {"competencia_anterior_id": comp_ant_id}),
+                       {"origem": origem_1_3, "competencia_anterior_id": comp_ant_id}),
         LinhaApuracao("1.4", "Estorno de débitos - Devoluções de vendas (não-ST)", linha_1_4, _fmt(dev_entrada_nao_st)),
         LinhaApuracao("1.5", "Estorno de débitos - Devoluções de vendas ST (Outros)", linha_1_5, _fmt(dev_entrada_st)),
 

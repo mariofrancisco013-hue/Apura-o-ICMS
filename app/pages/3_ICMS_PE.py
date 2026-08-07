@@ -15,7 +15,8 @@ from lib.cfops_antecipacao_pe import listar_cfops_antecipacao, salvar_cfops_ante
 from lib.calculo_icms_pe import (
     salvar_checkpoint_1024_pe, carregar_checkpoint_1024_pe,
     sugerir_valor_4101, carregar_valor_4101_manual, salvar_valor_4101_manual,
-    calcular_apuracao_pe,
+    carregar_valor_manual_pe, salvar_valor_manual_pe, remover_valor_manual_pe,
+    competencia_anterior_id, calcular_apuracao_pe,
 )
 from lib.calculo_icms_normal import salvar_apuracao
 from lib.formatacao import formatar_moeda, coluna_moeda
@@ -169,6 +170,61 @@ with aba_apuracao:
     if c_42.button("💾 Salvar valor manual"):
         salvar_valor_4101_manual(session, cid, valor_4101)
         st.success("Valor salvo.")
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### Linhas 1.2/1.3 — Créditos de antecipação do mês anterior")
+    st.caption(
+        "Por padrão, essas duas linhas são encadeadas automaticamente a partir da apuração já calculada da "
+        "competência anterior desta mesma empresa (linhas 3.1 e 3.2 de lá). Use os campos abaixo só se "
+        "precisar sobrescrever — por exemplo, na primeira competência cadastrada no sistema pra essa "
+        "empresa (não existe 'mês anterior' aqui dentro pra encadear, mas o valor recolhido de fato existe "
+        "fora do sistema)."
+    )
+    comp_ant_id = competencia_anterior_id(session, empresa_id, int(ano), int(mes))
+    if comp_ant_id:
+        sugestao_1_2 = session.execute(text(
+            "select valor from apuracao_linhas where competencia_id = :cid and linha = '3.1'"
+        ), {"cid": comp_ant_id}).scalar() or 0
+        sugestao_1_3 = session.execute(text(
+            "select valor from apuracao_linhas where competencia_id = :cid and linha = '3.2'"
+        ), {"cid": comp_ant_id}).scalar() or 0
+        st.caption(f"Encadeado automaticamente da competência anterior: 1.2 = {formatar_moeda(sugestao_1_2)}, "
+                   f"1.3 = {formatar_moeda(sugestao_1_3)}.")
+    else:
+        sugestao_1_2 = sugestao_1_3 = 0
+        st.caption("Não há competência anterior calculada no sistema para essa empresa — sem override "
+                   "manual, essas linhas ficam em R$ 0,00.")
+
+    manual_1_2 = carregar_valor_manual_pe(session, cid, "1.2")
+    manual_1_3 = carregar_valor_manual_pe(session, cid, "1.3")
+
+    c_12a, c_12b, c_12c = st.columns([2, 1, 1])
+    valor_1_2 = c_12a.number_input(
+        "Valor manual da linha 1.2 (R$)", value=float(manual_1_2) if manual_1_2 is not None else float(sugestao_1_2),
+        step=0.01, format="%.2f", key="valor_1_2_manual",
+    )
+    if c_12b.button("💾 Salvar 1.2", key="salvar_1_2_manual"):
+        salvar_valor_manual_pe(session, cid, "1.2", valor_1_2)
+        st.success("Valor da linha 1.2 salvo — vai sobrescrever o encadeamento automático.")
+        st.rerun()
+    if c_12c.button("↩️ Usar automático", key="remover_1_2_manual", disabled=manual_1_2 is None):
+        remover_valor_manual_pe(session, cid, "1.2")
+        st.success("Override removido — linha 1.2 volta a ser encadeada automaticamente.")
+        st.rerun()
+
+    c_13a, c_13b, c_13c = st.columns([2, 1, 1])
+    valor_1_3 = c_13a.number_input(
+        "Valor manual da linha 1.3 (R$)", value=float(manual_1_3) if manual_1_3 is not None else float(sugestao_1_3),
+        step=0.01, format="%.2f", key="valor_1_3_manual",
+    )
+    if c_13b.button("💾 Salvar 1.3", key="salvar_1_3_manual"):
+        salvar_valor_manual_pe(session, cid, "1.3", valor_1_3)
+        st.success("Valor da linha 1.3 salvo — vai sobrescrever o encadeamento automático.")
+        st.rerun()
+    if c_13c.button("↩️ Usar automático", key="remover_1_3_manual", disabled=manual_1_3 is None):
+        remover_valor_manual_pe(session, cid, "1.3")
+        st.success("Override removido — linha 1.3 volta a ser encadeada automaticamente.")
         st.rerun()
 
     st.markdown("---")
