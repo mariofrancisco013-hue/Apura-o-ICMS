@@ -409,7 +409,7 @@ def _aba_planilha(tipo_operacao, titulo):
                     "salvo no banco."
                 )
                 arq_conf = st.file_uploader(
-                    "Relatório de conferência PIS/COFINS e ICMS (.xls)", type=["xls"],
+                    "Relatório de conferência PIS/COFINS e ICMS (.xls ou .xlsx)", type=["xls", "xlsx"],
                     key=f"upload_conf_pc_{tipo_operacao}",
                 )
                 if st.button("Conferir divergência", key=f"btn_conf_pc_{tipo_operacao}",

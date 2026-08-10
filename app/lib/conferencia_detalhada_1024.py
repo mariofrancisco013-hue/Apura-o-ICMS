@@ -52,7 +52,14 @@ def parse_relatorio_conferencia_pc(arquivo):
     (cfop, nf_numero, produto_codigo) — soma base_icms/valor_icms de todas as linhas do mesmo item na
     mesma NF (o export pode trazer mais de uma linha por item). Não grava nada, não recebe competencia_id —
     é só leitura do arquivo enviado."""
-    df = pd.read_excel(arquivo, sheet_name="Report", header=None, engine="xlrd")
+    # engine="calamine" (não "xlrd"): o Winthor exporta esse relatório específico às vezes como .xlsx
+    # gerado por uma ferramenta chamada "ReportBuilder" que produz XML fora do padrão OOXML (atributos
+    # como "WindowWidth" em vez de "windowWidth", data incompleta em docProps/core.xml, etc.) — o openpyxl
+    # (usado por engine="xlsx"/padrão do pandas) valida esse XML rigorosamente e trava com TypeError em
+    # vários pontos diferentes por causa disso (achado em produção em 10/08/2026, arquivos "1096 f17.xlsx"
+    # e "1057 f17.xlsx"). O engine calamine (biblioteca Rust) lê célula por célula sem validar essa parte
+    # do XML e funciona tanto no .xlsx malformado quanto no .xls antigo (mesmo motor pros dois formatos).
+    df = pd.read_excel(arquivo, sheet_name="Report", header=None, engine="calamine")
     if len(df.columns) != len(COLS_RAW):
         raise ValueError(
             f"Arquivo tem {len(df.columns)} colunas, esperado {len(COLS_RAW)}. O layout deste relatório "

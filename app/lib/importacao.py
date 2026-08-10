@@ -132,15 +132,33 @@ def _dividir_codigo_descricao(valor):
 
 
 def _preparar_dataframe(arquivo, tipo_operacao, competencia_id):
-    """Lê o .xls e devolve um DataFrame já no formato exato da tabela notas_fiscais_itens, pronto para
-    to_sql — nenhum loop linha a linha."""
+    """Lê o .xls/.xlsx e devolve um DataFrame já no formato exato da tabela notas_fiscais_itens, pronto
+    para to_sql — nenhum loop linha a linha."""
     cols = COLS_ENTRADA if tipo_operacao == "entrada" else COLS_SAIDA
-    df = pd.read_excel(arquivo, sheet_name="Report", header=0, engine="xlrd")
+    # engine="calamine" (Rust) em vez de "xlrd": mais tolerante a exports do Winthor com XML fora do padrão
+    # (achado em 10/08/2026 com o relatório de conferência PIS/COFINS e ICMS, que às vezes vem como .xlsx
+    # gerado por uma ferramenta interna do Winthor chamada "ReportBuilder" com atributos de XML inválidos —
+    # ver app/lib/conferencia_detalhada_1024.py). Funciona igual nos dois formatos (.xls antigo e .xlsx).
+    df = pd.read_excel(arquivo, sheet_name="Report", header=None, engine="calamine")
     if len(df.columns) != len(cols):
         raise ValueError(
             f"Arquivo de {tipo_operacao} tem {len(df.columns)} colunas, esperado {len(cols)}. "
             f"O layout do export pode ter mudado — confira antes de importar."
         )
+
+    # Achado em 10/08/2026 (arquivo real "1057.xls" enviado pelo usuário, filial Supplex F17): nem todo
+    # export do Winthor vem com linha de cabeçalho. O formato "clássico" (usado por outras filiais, ex:
+    # Atacado F3) traz uma linha de cabeçalho genérico ("Coluna1", "Coluna2"...) na linha 0 — mas esse outro
+    # formato não tem cabeçalho nenhum: a linha 0 já é um item de nota fiscal de verdade. A versão anterior
+    # deste código sempre lia com header=0 (i.e., sempre descartava a linha 0 como cabeçalho) — no formato
+    # sem cabeçalho isso apagava silenciosamente o primeiro item de cada importação, sem erro nem aviso
+    # nenhum (bug real, só percebido comparando o arquivo original linha a linha). Agora a detecção é
+    # automática: olha o valor da linha 0 na posição do CFOP — se não for um número (ex: "Coluna7"), é
+    # cabeçalho e é descartada; se for um número de CFOP de verdade, a linha 0 é dado e fica.
+    idx_cfop = cols.index("cfop")
+    primeiro_cfop = pd.to_numeric(pd.Series([df.iloc[0, idx_cfop]]), errors="coerce").iloc[0]
+    if pd.isna(primeiro_cfop):
+        df = df.iloc[1:].reset_index(drop=True)
     df.columns = cols
 
     # Linhas de rodapé do export Winthor (ex: "Total geral" no fim do relatório) vêm com quase todas as
