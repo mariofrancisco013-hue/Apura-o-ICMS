@@ -32,21 +32,34 @@ _CSS_LOGIN = """
 [data-testid="stAppViewContainer"] {
     background: linear-gradient(160deg, #1E2D59 0%, #1E3D68 100%);
 }
-[data-testid="stAppViewContainer"] > .main .block-container {
-    display: flex; flex-direction: column; justify-content: center; min-height: 92vh;
+/* centralizado de verdade: bloco comum (não-flex) com largura travada e margin:auto — sem o truque de
+   st.columns() (deixava puxado pra direita) e sem display:flex no container todo (isso bagunçava a
+   largura dos elementos de dentro, tipo o botão "Entrar", que ficava fora do centro mesmo com a caixa
+   toda centralizada). Seletor por data-testid, não por classe ".main"/".block-container" (mudam de nome
+   entre versões do Streamlit — nessa virou "stMainBlockContainer"). */
+[data-testid="stMainBlockContainer"] {
+    max-width: 460px; margin: 8vh auto 0 auto; padding-left: 1rem; padding-right: 1rem;
 }
+[data-testid="stImage"] img { margin: 0 auto; display: block; }
 /* st.error()/st.warning() (se o login falhar) mantêm as cores padrão do próprio alerta do Streamlit —
    só o título/subtítulo/label dos campos (estilizados explicitamente abaixo) ficam brancos. */
 .login-titulo {
-    color: #FFFFFF; font-size: 2rem; font-weight: 700; margin: 0.4rem 0 0.15rem 0;
+    color: #FFFFFF; font-size: 2rem; font-weight: 700; margin: 0.4rem 0 0.15rem 0; text-align: center;
 }
 .login-subtitulo {
-    color: #B8CCE8; font-size: 0.95rem; margin-bottom: 1.6rem;
+    color: #B8CCE8; font-size: 0.95rem; margin-bottom: 1.6rem; text-align: center;
 }
+[data-testid="stForm"] { border: none; padding: 0; }
 [data-testid="stTextInput"] input {
     background-color: #F9FBFC; color: #1F2937;
 }
 [data-testid="stTextInput"] label { color: #E4ECF7 !important; }
+/* o botão de mostrar/ocultar senha (ícone de olho) fica dentro do mesmo campo branco — sem isso ele
+   herda o fundo escuro da página. */
+[data-testid="stTextInput"] button {
+    background-color: #F9FBFC !important; border-color: #F9FBFC !important;
+}
+[data-testid="stTextInput"] button svg { fill: #1F2937 !important; }
 div[data-testid="stForm"] button[kind="primaryFormSubmit"],
 div[data-testid="stForm"] button[kind="primary"],
 button[kind="primary"] {
@@ -80,19 +93,18 @@ def require_login():
 
     st.markdown(_CSS_LOGIN, unsafe_allow_html=True)
 
-    _, col, _ = st.columns([1, 1.3, 0.15])
-    with col:
-        st.write("")
-        st.write("")
-        if _LOGO_PATH.exists():
-            st.image(str(_LOGO_PATH), width=420)
-        st.markdown('<div class="login-titulo">Apuração ICMS</div>', unsafe_allow_html=True)
-        st.markdown('<div class="login-subtitulo">Entre com seu e-mail e senha para acessar</div>',
-                     unsafe_allow_html=True)
-        with st.form("login_form"):
-            email = st.text_input("E-mail")
-            senha = st.text_input("Senha", type="password")
-            entrar = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+    # sem st.columns() aqui — cada coluna vira um "stColumn" com largura própria por dentro do bloco já
+    # centralizado (CSS acima), e isso empurrava o formulário pra direita de novo. Escreve direto no
+    # bloco principal, que já está centralizado e com a largura travada em 460px.
+    if _LOGO_PATH.exists():
+        st.image(str(_LOGO_PATH), width=420)
+    st.markdown('<div class="login-titulo">Apuração ICMS</div>', unsafe_allow_html=True)
+    st.markdown('<div class="login-subtitulo">Entre com seu e-mail e senha para acessar</div>',
+                unsafe_allow_html=True)
+    with st.form("login_form"):
+        email = st.text_input("E-mail")
+        senha = st.text_input("Senha", type="password")
+        entrar = st.form_submit_button("Entrar", type="primary", use_container_width=True)
 
     if entrar:
         try:
