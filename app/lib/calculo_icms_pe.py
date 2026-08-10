@@ -458,11 +458,11 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
 # A Apuração ICMS PE usa linhas próprias (1, 1.1, 1.2... 7), diferentes das linhas oficiais do livro
 # (01 a 14, as mesmas que o ICMS Normal usa 1 pra 1 — ver comparar_com_checkpoint_1025 em
 # calculo_icms_normal.py). Aqui é preciso MAPEAR as linhas da Apuração PE para as linhas do livro antes de
-# comparar. Mapeamento validado ao centavo em 10/08/2026 contra o PDF real da Rotina 1025 da Ultra Comércio,
-# competência 05/2026 (fornecido pelo usuário):
+# comparar. Mapeamento original validado ao centavo em 10/08/2026 contra o PDF real da Rotina 1025 da Ultra
+# Comércio, competência 05/2026 (fornecido pelo usuário) — CORRIGIDO no mesmo dia, ver nota abaixo:
 #
 #   livro 04 (Subtotal Débito)              = PE 2       (Débitos Totais)
-#   livro 05 (Entradas com crédito)         = PE 1.1     (Créditos Entradas - Devoluções)
+#   livro 05 (Entradas com crédito)         = PE 1.1 + 1.4 + 1.5  (ver correção abaixo)
 #   livro 06 (Outros Créditos)              = PE 1.2 + 1.3 + 4   (antecipação do mês anterior + crédito
 #                                              presumido calculado — confirmado pelo usuário: "o credito de
 #                                              1,1% e 6% do periodo anterior entram na apuração como
@@ -480,6 +480,19 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
 # As linhas 01/02/03/07/12 do livro não têm um mapeamento confiável no modelo de Crédito Presumido (não há,
 # por exemplo, um "Estorno de Créditos" nem "Outros Débitos" discriminado separadamente na Apuração PE) —
 # aparecem na comparação só como referência (valor do PDF), sem comparação automática.
+#
+# CORREÇÃO EM 10/08/2026 (livro 05): o mapeamento original usava só PE 1.1 ("Créditos Entradas -
+# Devoluções", ou seja, JÁ excluindo as devoluções). Isso bateu certinho em 05/2026 por coincidência — não
+# houve nenhuma CFOP de devolução de venda (1202/2202/símiles) naquela competência, então 1.1 sozinha já era
+# igual ao total de crédito de Entrada. Numa competência com devolução de verdade, apareceu uma diferença
+# de R$ 884,76 no livro 05 (calculado R$ 131.293,46 vs Rotina 1025 real R$ 132.178,22) — o usuário confirmou:
+# "as devoluções deveriam entrar nesse por entradas/aquisições com credito do imposto". Faz sentido: o livro
+# fiscal soma TODO crédito de Entrada na linha 05, sem separar por "motivo" da entrada — a separação
+# 1.1 (compra) vs 1.4/1.5 (devolução de venda, contabilizada como "estorno de débito" internamente) é uma
+# visão ANALÍTICA nossa, usada só pra calcular corretamente a base do Crédito Presumido (linha 4.3.02 usa só
+# 1.1) — não existe no livro oficial. Corrigido: livro 05 agora soma PE 1.1 + 1.4 + 1.5 (equivalente ao
+# total_credito_entrada bruto, antes da separação). Não muda nenhuma outra linha do livro nem o valor final
+# a recolher (linha 7) — só a comparação/conferência com a Rotina 1025 real.
 # ============================================================================================
 
 _LIVRO_1025_LABELS = {
@@ -522,7 +535,9 @@ def comparar_com_checkpoint_1025_pe(session, competencia_id: int) -> list[dict]:
     saldo_7 = g("7")
     calc = {
         "04": g("2"),
-        "05": g("1.1"),
+        # PE 1.1 + 1.4 + 1.5 = total de crédito de Entrada bruto (livro não separa compra de devolução de
+        # venda — ver nota de correção de 10/08/2026 acima).
+        "05": g("1.1") + g("1.4") + g("1.5"),
         "06": g("1.2") + g("1.3") + g("4"),
         "08": g("1") + g("4"),
         "09": -g("6"),  # linha 6 já é <= 0 no nosso modelo (0 ou saldo credor negativo)
