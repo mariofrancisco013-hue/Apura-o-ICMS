@@ -412,6 +412,7 @@ def _aba_planilha(tipo_operacao, titulo):
                     "Relatório de conferência PIS/COFINS e ICMS (.xls ou .xlsx)", type=["xls", "xlsx"],
                     key=f"upload_conf_pc_{tipo_operacao}",
                 )
+                _key_ok = f"conf_pc_cfops_validados_{tipo_operacao}"
                 if st.button("Conferir divergência", key=f"btn_conf_pc_{tipo_operacao}",
                               disabled=arq_conf is None):
                     try:
@@ -420,13 +421,19 @@ def _aba_planilha(tipo_operacao, titulo):
                         )
                     except ValueError as e:
                         st.error(str(e))
+                        st.session_state.pop(_key_ok, None)
                     else:
                         if divergentes_item.empty:
                             st.success(
                                 "Nenhuma diferença encontrada item a item entre o relatório enviado e o "
                                 "que está importado no sistema, para o(s) CFOP(s) deste arquivo."
                             )
+                            # guarda em session_state (não só na variável local) porque o botão de
+                            # "aceitar como arredondamento" abaixo é renderizado num rerun separado do
+                            # Streamlit — sem isso ele não saberia que essa conferência já passou.
+                            st.session_state[_key_ok] = sorted(comparado_item["cfop"].unique().tolist())
                         else:
+                            st.session_state.pop(_key_ok, None)
                             st.warning(
                                 f"{len(divergentes_item)} item(ns) com diferença — CFOP(s) no relatório: "
                                 f"{', '.join(str(c) for c in sorted(divergentes_item['cfop'].unique()))}."
@@ -447,6 +454,45 @@ def _aba_planilha(tipo_operacao, titulo):
                                 "sistema\" = o contrário. \"Valor diferente\" = o item existe dos dois "
                                 "lados mas a base ou o ICMS não batem."
                             )
+
+                # Pedido do usuário em 10/08/2026: depois que a conferência item a item confirma que não
+                # há diferença real (todo item bate 1-pra-1 com o sistema), a pequena diferença que ainda
+                # aparece lá em cima contra a Rotina 1024 (diff_base/diff_icms) só pode ser arredondamento
+                # acumulado — não tem mais o que investigar nos dados. Este botão fecha o loop: marca o(s)
+                # CFOP(s) confirmados como "sem validação" (mesmo cadastro já usado pra CFOP 1602 e
+                # símiles), com o motivo já preenchido citando os valores exatos da diferença — documentado
+                # e reversível (dá pra remover depois em 🚫 CFOPs sem Validação), em vez de só sumir da tela.
+                _cfops_validados = st.session_state.get(_key_ok) or []
+                _pendentes_arred = divergentes[divergentes["cfop"].isin(_cfops_validados)] \
+                    if _cfops_validados else divergentes.iloc[0:0]
+                if not _pendentes_arred.empty:
+                    st.info(
+                        f"O(s) CFOP(s) {', '.join(str(c) for c in _pendentes_arred['cfop'])} foram "
+                        f"validados item a item pelo relatório detalhado (nenhuma diferença real "
+                        f"encontrada), mas ainda aparecem divergentes contra a Rotina 1024 — provável "
+                        f"arredondamento acumulado (ver explicação de cada CFOP na tabela acima)."
+                    )
+                    if st.button("🔄 Aceitar diferença como arredondamento (marcar sem validação)",
+                                  key=f"btn_arred_{tipo_operacao}"):
+                        atual_sv = listar_cfops_sem_validacao(session, empresa_id)
+                        novas_sv = pd.DataFrame([{
+                            "id": None, "cfop": row["cfop"], "descricao": None,
+                            "motivo": (
+                                f"Diferença de arredondamento (não é item faltando): diff_base="
+                                f"{formatar_moeda(row['diff_base'])}, diff_icms="
+                                f"{formatar_moeda(row['diff_icms'])} contra a Rotina 1024 — confirmado via "
+                                f"conferência item a item com o relatório PIS/COFINS e ICMS, sem nenhuma "
+                                f"divergência real encontrada."
+                            ),
+                            "criado_por_email": None, "created_at": None,
+                        } for _, row in _pendentes_arred.iterrows()])
+                        salvar_cfops_sem_validacao(
+                            session, empresa_id, atual_sv, pd.concat([atual_sv, novas_sv], ignore_index=True),
+                            usuario=usuario_atual(),
+                        )
+                        st.session_state.pop(_key_ok, None)
+                        st.success("CFOP(s) marcados como sem validação (arredondamento confirmado).")
+                        st.rerun()
         elif ref_editado["base_1024"].notna().any():
             st.success("Tudo bateu com os valores da Rotina 1024 informados "
                        "(fora os CFOPs marcados como sem validação, se houver).")
