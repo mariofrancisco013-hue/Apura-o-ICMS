@@ -36,6 +36,27 @@ COLS_TABELA = [
 ]
 
 
+def buscar_competencia(session, empresa_cnpj, ano, mes, modulo="icms_normal"):
+    """Só CONSULTA — devolve o id da competência se ela já existir, ou None se não existir ainda. Não cria
+    nada no banco. Existe pra separar "olhar" de "criar" (ver get_or_create_competencia): páginas que só
+    mostram dados de uma competência (ex: ICMS PE, ao trocar Empresa/Ano/Mês no topo da tela) devem usar
+    esta função, não get_or_create_competencia — senão navegar pelos filtros cria uma competência vazia no
+    banco a cada mês passado, mesmo sem importar nada (achado pelo usuário em 10/08/2026: "quando eu avanço
+    o mês ele cria uma nova apuração", "sem eu ter importado nada" — a tela de ICMS PE chamava
+    get_or_create_competencia direto na renderização, sem esperar nenhuma ação real do analista). A
+    competência só deve ser criada de fato no momento em que o analista realmente faz alguma coisa
+    (importar um PDF, salvar um valor manual, calcular a apuração) — ver get_or_create_competencia, chamada
+    só nesses pontos de gravação."""
+    empresa = session.execute(
+        text("select id from empresas where cnpj = :cnpj"), {"cnpj": empresa_cnpj}
+    ).fetchone()
+    if not empresa:
+        return None
+    return session.execute(text("""
+        select id from competencias where empresa_id=:eid and ano=:ano and mes=:mes and modulo=:modulo
+    """), {"eid": empresa[0], "ano": ano, "mes": mes, "modulo": modulo}).scalar()
+
+
 def get_or_create_competencia(session, empresa_cnpj, ano, mes, modulo="icms_normal"):
     empresa = session.execute(
         text("select id from empresas where cnpj = :cnpj"), {"cnpj": empresa_cnpj}

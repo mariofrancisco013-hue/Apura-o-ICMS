@@ -34,3 +34,17 @@ def coluna_moeda(label: str, **kwargs):
     import streamlit as st
     kwargs.setdefault("format", "R$ %.2f")
     return st.column_config.NumberColumn(label, **kwargs)
+
+
+def rotulo_empresa(e) -> str:
+    """Rótulo padrão para todo seletor de empresa da aplicação (Importar Relatórios, ICMS PE, Empresas —
+    excluir) — pedido do usuário em 10/08/2026: "ajuste o filtro para selecionar a empresa pela filial do
+    Winthor", com a ordem "filial, cnpj e nome da empresa" confirmada pelo usuário. Filial primeiro porque
+    é o código mais curto, o que o analista já reconhece de cabeça vindo do Winthor — mais rápido de achar
+    digitando no menu do que procurar pela razão social inteira.
+
+    `e` precisa ter as chaves filial_winthor, cnpj, razao_social (linha de `select ... from empresas`, com
+    o filial_winthor incluído na consulta — sem ele o rótulo não tem o que mostrar). Filial em branco (campo
+    opcional no cadastro) mostra "(sem filial)" no lugar, para a empresa continuar aparecendo na lista."""
+    filial = e["filial_winthor"] if e["filial_winthor"] else "(sem filial)"
+    return f"{filial} — {e['cnpj']} — {e['razao_social']}"

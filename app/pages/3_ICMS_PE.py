@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 from lib.auth import require_login, logout_button, usuario_atual
 from lib.db import get_session
-from lib.importacao import get_or_create_competencia
+from lib.importacao import buscar_competencia, get_or_create_competencia
 from lib.importar_1024 import parse_rotina_1024
 from lib.extrato_antecipado_pe import (
     parse_extrato_antecipado, salvar_extrato_antecipado, listar_extrato_antecipado, listar_nao_recuperavel,
@@ -23,7 +23,7 @@ from lib.calculo_icms_pe import (
 from lib.calculo_icms_normal import salvar_apuracao
 from lib.importar_1025 import parse_rotina_1025
 from lib.planilha import salvar_checkpoint_1025_bulk
-from lib.formatacao import formatar_moeda, coluna_moeda
+from lib.formatacao import formatar_moeda, coluna_moeda, rotulo_empresa
 from sqlalchemy import text
 
 st.set_page_config(page_title="ICMS PE", layout="wide")
@@ -39,20 +39,43 @@ st.caption(
 
 session = get_session()
 
-empresas = session.execute(text("select id, razao_social, cnpj from empresas order by razao_social")).mappings().all()
+empresas = session.execute(text(
+    "select id, filial_winthor, razao_social, cnpj from empresas order by filial_winthor, razao_social"
+)).mappings().all()
 if not empresas:
     st.warning("Nenhuma empresa cadastrada ainda. Cadastre em **Empresas** antes de continuar.")
     st.stop()
 
 col1, col2, col3 = st.columns(3)
-empresa = col1.selectbox("Empresa", empresas, format_func=lambda e: f"{e['razao_social']} ({e['cnpj']})")
+empresa = col1.selectbox("Empresa", empresas, format_func=rotulo_empresa)
 ano = col2.number_input("Ano", min_value=2020, max_value=2100, value=2026, step=1)
 mes = col3.number_input("Mês", min_value=1, max_value=12, value=6, step=1)
 
-cid = get_or_create_competencia(session, empresa["cnpj"], ano, mes, modulo="icms_antecipado")
 empresa_id = empresa["id"]
-status = session.execute(text("select status from competencias where id = :cid"), {"cid": cid}).scalar()
-st.caption(f"Competência: **{empresa['razao_social']} — {mes:02d}/{ano}** (status: {status}).")
+
+# Só CONSULTA se a competência já existe — não cria nada no banco (ver docstring de buscar_competencia em
+# app/lib/importacao.py). A competência só é criada de fato no momento de uma ação real (importar um PDF,
+# salvar um valor manual, calcular a apuração) via _garantir_competencia() logo abaixo — pedido do usuário
+# em 10/08/2026: "quando eu avanço o mês ele cria uma nova apuração, sem eu ter importado nada".
+cid = buscar_competencia(session, empresa["cnpj"], int(ano), int(mes), modulo="icms_antecipado")
+
+
+def _garantir_competencia():
+    """Chamar SÓ dentro de uma ação de gravação (botão de importar/salvar/calcular) — cria a competência no
+    banco se ainda não existir, e atualiza a variável `cid` do script pro resto da execução deste rerun."""
+    global cid
+    if cid is None:
+        cid = get_or_create_competencia(session, empresa["cnpj"], int(ano), int(mes), modulo="icms_antecipado")
+    return cid
+
+
+if cid is None:
+    status = None
+    st.caption(f"Competência: **{empresa['razao_social']} — {mes:02d}/{ano}** — ainda não criada (nada "
+               f"importado/salvo ainda nesta competência).")
+else:
+    status = session.execute(text("select status from competencias where id = :cid"), {"cid": cid}).scalar()
+    st.caption(f"Competência: **{empresa['razao_social']} — {mes:02d}/{ano}** (status: {status}).")
 
 (aba_1024, aba_extrato, aba_nao_recuperavel, aba_cfops, aba_apuracao) = st.tabs([
     "📥 Rotina 1024", "📄 Extrato de ICMS Antecipado", "🚫 Não Recuperável (Extrato Fronteira)",
@@ -71,6 +94,7 @@ with aba_1024:
                                     label_visibility="collapsed")
     if c_up2.button("📥 Importar do PDF", key="importar_1024_pe", disabled=pdf_1024 is None):
         try:
+            cid = _garantir_competencia()
             linhas_1024 = parse_rotina_1024(pdf_1024)
             n = salvar_checkpoint_1024_pe(session, cid, linhas_1024)
             st.success(f"{n} CFOP(s) importado(s) do PDF da Rotina 1024 (Entrada + Saída juntas).")
@@ -151,6 +175,7 @@ with aba_extrato:
                                        key="upload_extrato_pe", label_visibility="collapsed")
     if c_up2.button("📥 Importar do PDF", key="importar_extrato_pe", disabled=pdf_extrato is None):
         try:
+            cid = _garantir_competencia()
             grupos = parse_extrato_antecipado(pdf_extrato)
             n = salvar_extrato_antecipado(session, cid, grupos)
             st.success(f"{n} grupo(s) de mercadoria importado(s) do Extrato.")
@@ -242,6 +267,7 @@ with aba_apuracao:
     c_41, c_42 = st.columns([2, 1])
     valor_4101 = c_41.number_input("Valor da linha 4.1.01 (R$)", value=valor_inicial, step=0.01, format="%.2f")
     if c_42.button("💾 Salvar valor manual"):
+        cid = _garantir_competencia()
         salvar_valor_4101_manual(session, cid, valor_4101)
         st.success("Valor salvo.")
         st.rerun()
@@ -279,6 +305,7 @@ with aba_apuracao:
         step=0.01, format="%.2f", key="valor_1_2_manual",
     )
     if c_12b.button("💾 Salvar 1.2", key="salvar_1_2_manual"):
+        cid = _garantir_competencia()
         salvar_valor_manual_pe(session, cid, "1.2", valor_1_2)
         st.success("Valor da linha 1.2 salvo — vai sobrescrever o encadeamento automático.")
         st.rerun()
@@ -293,6 +320,7 @@ with aba_apuracao:
         step=0.01, format="%.2f", key="valor_1_3_manual",
     )
     if c_13b.button("💾 Salvar 1.3", key="salvar_1_3_manual"):
+        cid = _garantir_competencia()
         salvar_valor_manual_pe(session, cid, "1.3", valor_1_3)
         st.success("Valor da linha 1.3 salvo — vai sobrescrever o encadeamento automático.")
         st.rerun()
@@ -313,6 +341,7 @@ with aba_apuracao:
             "se estão corretos antes de calcular a apuração."
         )
     if st.button("🧮 Calcular apuração", type="primary", disabled=_bloqueado_transf):
+        cid = _garantir_competencia()
         with st.spinner("Calculando..."):
             linhas = calcular_apuracao_pe(session, cid, empresa_id, int(ano), int(mes),
                                            valor_4101_manual=valor_4101)
@@ -420,6 +449,7 @@ with aba_apuracao:
             )
             if c_up1025_2.button("📥 Importar do PDF", key="importar_1025_pe", disabled=pdf_1025_pe is None):
                 try:
+                    cid = _garantir_competencia()
                     valores_1025 = parse_rotina_1025(pdf_1025_pe)
                     df_1025_pe = pd.DataFrame([
                         {"linha": linha, "valor_1025": float(valor)}

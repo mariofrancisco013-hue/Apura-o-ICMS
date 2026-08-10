@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 from lib.auth import require_login, logout_button
 from lib.db import get_session
+from lib.formatacao import rotulo_empresa
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -65,7 +66,7 @@ if not empresas:
     st.info("Nenhuma empresa cadastrada ainda.")
 else:
     empresa_excluir = st.selectbox(
-        "Empresa a excluir", empresas, format_func=lambda e: f"{e['razao_social']} ({e['cnpj']})",
+        "Empresa a excluir", empresas, format_func=rotulo_empresa,
         key="empresa_excluir",
     )
     confirmar = st.checkbox(
