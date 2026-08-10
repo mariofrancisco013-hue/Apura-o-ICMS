@@ -16,6 +16,17 @@ Diferença proposital em relação ao original: os botões "Criar conta" e "Esqu
 replicados aqui porque esse app não tem esses dois fluxos implementados (só login com e-mail/senha já
 cadastrados no Supabase Auth) — colocar os botões sem funcionar seria enganoso. Dá pra implementar os dois
 se for útil, é só pedir.
+
+Barra lateral (pedido do usuário em 10/08/2026, mesma referência visual): fundo azul-marinho igual o
+login, logo do grupo via `st.logo()` (API nativa do Streamlit pra isso — aparece tanto com a barra aberta
+quanto com o menuzinho de expandir quando colapsada) e o link da página atual destacado (usa o atributo
+`aria-current="page"` que o próprio Streamlit já marca no menu automático de páginas — não precisei
+inventar lógica pra saber qual página tá ativa). Limitação: o menu de páginas automático (baseado nos
+arquivos de app/pages/) é renderizado pelo framework ANTES de qualquer código nosso rodar, então não dá
+pra colocar um texto tipo "Apuração ICMS" ENTRE a logo e a lista de páginas (como no app de referência) —
+só dá pra colocar coisa depois da lista (onde hoje mostra o e-mail/Sair). Pra ter esse controle total
+(e ícone por página) precisaria trocar pro `st.navigation()`, API mais nova que substitui o menu automático
+por um montado à mão — é uma mudança maior, mexe em todas as páginas; se quiser isso, é só pedir.
 """
 from pathlib import Path
 
@@ -23,6 +34,52 @@ import streamlit as st
 from supabase import create_client
 
 _LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "logos_grupo.png"
+
+_CSS_SIDEBAR = """
+<style>
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #1E2D59 0%, #1E3D68 100%);
+}
+[data-testid="stSidebarHeader"] { padding-bottom: 0; }
+[data-testid="stSidebarLogo"] { padding: 0.5rem 0 0.5rem 0.25rem; }
+[data-testid="stSidebarCollapseButton"] button span span { color: #FFFFFF !important; }
+/* lista de páginas (menu automático) */
+[data-testid="stSidebarNavLink"] span, [data-testid="stSidebarNavLink"] p {
+    color: #C7D6EF !important; font-size: 0.92rem;
+}
+[data-testid="stSidebarNavLink"] {
+    border-radius: 0.5rem; margin: 0.1rem 0.6rem; padding-left: 0.6rem !important;
+}
+[data-testid="stSidebarNavLink"]:hover { background-color: rgba(255, 255, 255, 0.08); }
+/* página atual (o próprio Streamlit marca com aria-current="page") */
+[data-testid="stSidebarNavLink"][aria-current="page"] {
+    background-color: rgba(59, 130, 246, 0.25);
+}
+[data-testid="stSidebarNavLink"][aria-current="page"] span,
+[data-testid="stSidebarNavLink"][aria-current="page"] p {
+    color: #FFFFFF !important; font-weight: 600;
+}
+[data-testid="stSidebarNavSeparator"] { background-color: rgba(255, 255, 255, 0.15); }
+/* área abaixo da lista de páginas (usuário logado + botão Sair, ver logout_button()) */
+[data-testid="stSidebarUserContent"] [data-testid="stCaptionContainer"] p,
+[data-testid="stSidebarUserContent"] [data-testid="stMarkdownContainer"] p { color: #C7D6EF; }
+[data-testid="stSidebarUserContent"] a { color: #7FB2F0; }
+.sidebar-user { display: flex; align-items: center; gap: 0.5rem; margin: 0.4rem 0 0.9rem 0; }
+.sidebar-user-avatar {
+    width: 2rem; height: 2rem; border-radius: 50%; background-color: #2DD4BF; color: #0B1E3D;
+    font-weight: 700; font-size: 0.9rem; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+}
+.sidebar-user-email {
+    color: #E4ECF7; font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+[data-testid="stSidebarUserContent"] button {
+    background-color: transparent !important; border-color: rgba(255, 255, 255, 0.35) !important;
+    color: #FFFFFF !important;
+}
+[data-testid="stSidebarUserContent"] button:hover { border-color: #FFFFFF !important; }
+</style>
+"""
 
 _CSS_LOGIN = """
 <style>
@@ -130,9 +187,22 @@ def usuario_atual() -> dict:
 
 
 def logout_button():
-    if st.sidebar.button("Sair"):
+    st.markdown(_CSS_SIDEBAR, unsafe_allow_html=True)
+    if _LOGO_PATH.exists():
+        st.logo(str(_LOGO_PATH), size="large")
+
+    email = st.session_state.get("user_email")
+    if email:
+        inicial = email[0].upper()
+        st.sidebar.markdown(
+            f'<div class="sidebar-user">'
+            f'<div class="sidebar-user-avatar">{inicial}</div>'
+            f'<div class="sidebar-user-email">{email}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    if st.sidebar.button("Sair", use_container_width=True):
         st.session_state.pop("supabase_session", None)
         st.session_state.pop("user_email", None)
         st.rerun()
-    if "user_email" in st.session_state:
-        st.sidebar.caption(f"Logado como {st.session_state['user_email']}")
