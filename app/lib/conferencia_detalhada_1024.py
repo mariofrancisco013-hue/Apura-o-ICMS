@@ -97,8 +97,16 @@ def carregar_sistema_agregado(session, competencia_id, tipo_operacao, cfops):
         where competencia_id = :cid and tipo_operacao = :tipo and cfop in ({placeholders})
         group by cfop, nf_numero, produto_codigo
     """), params).mappings().all()
-    return pd.DataFrame(linhas, columns=["cfop", "nf_numero", "produto_codigo", "base_icms_sistema",
-                                          "valor_icms_sistema"])
+    out = pd.DataFrame(linhas, columns=["cfop", "nf_numero", "produto_codigo", "base_icms_sistema",
+                                         "valor_icms_sistema"])
+    # o Postgres devolve sum(numeric) como decimal.Decimal (via psycopg2) — subtrair Decimal de float dá
+    # TypeError ("unsupported operand type(s) for -: 'decimal.Decimal' and 'float'") na hora de calcular
+    # diff_base/diff_icms lá na frente. Convertendo pra float aqui, logo na leitura, evita o erro (achado
+    # em produção em 10/08/2026 — não aparecia nos testes locais porque o SQLite de teste guarda os valores
+    # como float puro, sem essa conversão do driver do Postgres).
+    out["base_icms_sistema"] = pd.to_numeric(out["base_icms_sistema"], errors="coerce").astype(float)
+    out["valor_icms_sistema"] = pd.to_numeric(out["valor_icms_sistema"], errors="coerce").astype(float)
+    return out
 
 
 def comparar_relatorio_com_sistema(session, competencia_id, tipo_operacao, arquivo):
