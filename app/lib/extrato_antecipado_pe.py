@@ -109,6 +109,26 @@ def listar_extrato_antecipado(session, competencia_id: int):
     return pd.DataFrame(rows, columns=["grupo_mercadoria", "direito_credito", "icms_devido"])
 
 
+def listar_nao_recuperavel(session, competencia_id: int):
+    """DataFrame só com os grupos de mercadoria SEM direito a crédito ("Direito a crédito" = Não no PDF do
+    Extrato/e-Fisco) — esse valor não compõe a linha 3.2 nem nenhuma outra linha da Apuração ICMS PE, e
+    também não entra na Rotina 1025 (não gera crédito nenhum, é imposto pago e perdido). Pedido do usuário
+    em 10/08/2026: "o valor não recuperavel do extrato fronteira que é aquele que tiver como não, não entra
+    na 1025, crie uma aba a parte só para informa-lo" — aba separada só para deixar esse valor visível e
+    rastreável (ex: pra decidir se vale a pena revisar a classificação do grupo junto à Sefaz/PE), sem
+    misturar com os grupos que efetivamente entram no cálculo."""
+    import pandas as pd
+    from sqlalchemy import text
+
+    rows = session.execute(text("""
+        select grupo_mercadoria, icms_devido
+        from extrato_antecipado_pe
+        where competencia_id = :cid and direito_credito = false
+        order by grupo_mercadoria
+    """), {"cid": competencia_id}).mappings().all()
+    return pd.DataFrame(rows, columns=["grupo_mercadoria", "icms_devido"])
+
+
 def total_antecipacao_externa(session, competencia_id: int):
     """Soma de icms_devido só dos grupos com direito_credito=true — é o valor da linha '3.2 - Antecipação
     ... fora do estado' da Apuração ICMS PE (ver docstring do módulo)."""

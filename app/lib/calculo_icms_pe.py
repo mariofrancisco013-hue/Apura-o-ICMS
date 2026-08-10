@@ -58,7 +58,11 @@ def _fmt(d: dict) -> dict:
 
 def salvar_checkpoint_1024_pe(session, competencia_id: int, linhas_1024: list[dict]) -> int:
     """`linhas_1024` é o retorno de app.lib.importar_1024.parse_rotina_1024 (lista de dicts com cfop,
-    valor_contabil, valor_base, valor_icms). Substitui (apaga+insere) os checkpoints desta competência."""
+    valor_contabil, valor_base, valor_icms). Substitui (apaga+insere) os checkpoints desta competência.
+
+    Também apaga a confirmação de CFOPs de transferência já registrada (ver confirmar_transferencia_pe) —
+    cada reimportação da Rotina 1024 obriga uma nova conferência, pra não deixar uma confirmação antiga
+    "Sim" (ou "Não", pedindo correção) valendo pra um arquivo diferente do que gerou o aviso."""
     session.execute(text(
         "delete from checkpoints_referencia where competencia_id = :cid and fonte = 'rotina_1024'"
     ), {"cid": competencia_id})
@@ -70,8 +74,62 @@ def salvar_checkpoint_1024_pe(session, competencia_id: int, linhas_1024: list[di
             "cid": competencia_id, "cfop": int(r["cfop"]),
             "vc": float(r["valor_contabil"]), "vb": float(r["valor_base"]), "vi": float(r["valor_icms"]),
         })
+    session.execute(text(
+        "delete from confirmacoes_apuracao where competencia_id = :cid and tipo = 'cfop_transferencia_pe'"
+    ), {"cid": competencia_id})
     session.commit()
     return len(linhas_1024)
+
+
+# ============================================================================================
+# CONFERÊNCIA DE CFOPs DE TRANSFERÊNCIA (pedido do usuário em 10/08/2026) — ao contrário do ICMS Normal
+# (onde CFOP is_st+is_transferencia já é tratado automaticamente como sem efeito), o modelo de Crédito
+# Presumido soma CFOP de transferência junto com os demais nas linhas normais (1.1 na Entrada; 2.1/2.3 na
+# Saída) — um CFOP de transferência errado na Rotina 1024 pode distorcer a apuração sem nenhum aviso. Por
+# isso, sempre que a Rotina 1024 importada tiver algum CFOP de transferência (is_transferencia=true), o
+# analista precisa confirmar explicitamente que está correto antes de calcular a apuração.
+# ============================================================================================
+
+def listar_cfops_transferencia_checkpoint(session, competencia_id: int):
+    """CFOPs de transferência (is_transferencia=true) presentes na Rotina 1024 importada desta competência
+    — o que dispara o aviso de conferência. Lista vazia = nada a confirmar."""
+    rows = session.execute(text("""
+        select r.cfop, ce.descricao, r.valor_contabil,
+               case when r.cfop / 1000 in (1, 2, 3) then 'Entrada' else 'Saída' end as direcao
+        from checkpoints_referencia r
+        join cfop_efetivo ce on ce.codigo = r.cfop
+        where r.competencia_id = :cid and r.fonte = 'rotina_1024' and ce.is_transferencia = true
+        order by r.cfop
+    """), {"cid": competencia_id}).mappings().all()
+    return list(rows)
+
+
+def carregar_confirmacao(session, competencia_id: int, tipo: str):
+    """Última confirmação registrada para este tipo (ver confirmacoes_apuracao) — None se ainda não houve
+    nenhuma confirmação para esta competência/tipo (ex: depois de uma reimportação da Rotina 1024)."""
+    row = session.execute(text("""
+        select confirmado, observacao, confirmado_por_email, confirmado_em
+        from confirmacoes_apuracao where competencia_id = :cid and tipo = :tipo
+    """), {"cid": competencia_id, "tipo": tipo}).mappings().first()
+    return dict(row) if row else None
+
+
+def salvar_confirmacao(session, competencia_id: int, tipo: str, confirmado: bool, usuario: dict = None,
+                        observacao: str = None) -> None:
+    usuario = usuario or {}
+    session.execute(text("""
+        insert into confirmacoes_apuracao
+            (competencia_id, tipo, confirmado, observacao, confirmado_por, confirmado_por_email, confirmado_em)
+        values (:cid, :tipo, :confirmado, :obs, :por, :email, now())
+        on conflict (competencia_id, tipo) do update
+            set confirmado = excluded.confirmado, observacao = excluded.observacao,
+                confirmado_por = excluded.confirmado_por, confirmado_por_email = excluded.confirmado_por_email,
+                confirmado_em = excluded.confirmado_em
+    """), {
+        "cid": competencia_id, "tipo": tipo, "confirmado": confirmado, "obs": observacao,
+        "por": usuario.get("id"), "email": usuario.get("email"),
+    })
+    session.commit()
 
 
 def carregar_checkpoint_1024_pe(session, competencia_id: int):
@@ -219,7 +277,17 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
     mês anterior — ver competencia_anterior_id). Por padrão essas linhas são encadeadas automaticamente da
     competência anterior já calculada no sistema; passe um valor aqui (ou salve com salvar_valor_manual_pe)
     pra sobrescrever — necessário, por exemplo, na primeira competência cadastrada pra essa empresa, onde
-    não existe "mês anterior" dentro do sistema pra encadear."""
+    não existe "mês anterior" dentro do sistema pra encadear.
+
+    Linha 6 (Saldo Crédito Anterior) — regra de trimestre (pedido do usuário em 10/08/2026): pelo Decreto
+    de Crédito Presumido de PE, saldo credor não pode ser transportado de um trimestre pro outro, tem que
+    ser zerado com um lançamento de "Outros Débitos" na própria Rotina 1025/e-Fisco no fechamento de
+    março/junho/setembro/dezembro. Por isso o encadeamento automático da linha 6 NUNCA atravessa essa
+    fronteira: se a competência anterior era um desses quatro meses, a linha 6 desta competência começa
+    zerada mesmo que aquela tenha fechado credora. E se ESTA competência é um desses quatro meses e fecha
+    credora, a linha 7 vem com um aviso (`detalhe["aviso_zerar_saldo_credor_trimestre"]`) pra lembrar o
+    analista de fazer esse lançamento antes de fechar o período — ver o aviso também na tela (aba
+    Apuração)."""
     entrada = _cfops_presentes(session, competencia_id, (1, 2, 3))
     saida = _cfops_presentes(session, competencia_id, (5, 6, 7))
     buckets = cfops_por_bucket(session, empresa_id)  # {"interna": [cfop,...], "externa": [cfop,...]}
@@ -305,10 +373,27 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
     # --- 5/6/7 — Valor a Recolher, Saldo Anterior, Valor Recolher Atual ---
     linha_5 = linha_2 - linha_1 - linha_4
     linha_7_anterior = _valor_linha(session, comp_ant_id, "7") if comp_ant_id else Decimal("0")
-    # só carrega saldo pra frente se a competência anterior fechou credora (valor negativo = "a recolher"
-    # negativo, ou seja, saldo credor); se fechou devedora (>=0, já recolhida), não há saldo a transportar.
-    linha_6 = linha_7_anterior if linha_7_anterior < 0 else Decimal("0")
+
+    # Regra do Decreto de Crédito Presumido de PE (pedido do usuário em 10/08/2026): saldo credor NÃO pode
+    # ser transportado de um trimestre pro outro — tem que ser zerado com um lançamento de "Outros Débitos"
+    # (linha 02) direto na Rotina 1025/e-Fisco, sempre no último mês do trimestre (março/junho/setembro/
+    # dezembro). Por isso, se a competência ANTERIOR era o último mês de um trimestre, o encadeamento
+    # automático da linha 6 pára aí — mesmo que ela tenha fechado credora, não carrega esse saldo pra cá
+    # (esse saldo já deveria ter sido zerado no e-Fisco antes de fechar aquele trimestre; ver aviso na tela
+    # de Apuração quando ESTA competência for de fechamento de trimestre e fechar credora).
+    mes_anterior = 12 if mes == 1 else mes - 1
+    zerado_por_trimestre = mes_anterior in (3, 6, 9, 12)
+    if zerado_por_trimestre:
+        linha_6 = Decimal("0")
+        origem_6 = "zerado_fechamento_trimestre"
+    else:
+        # só carrega saldo pra frente se a competência anterior fechou credora (valor negativo = "a
+        # recolher" negativo, ou seja, saldo credor); se fechou devedora (>=0, já recolhida), não há saldo
+        # a transportar.
+        linha_6 = linha_7_anterior if linha_7_anterior < 0 else Decimal("0")
+        origem_6 = "encadeado_competencia_anterior" if comp_ant_id else "sem_competencia_anterior"
     linha_7 = linha_6 + linha_5
+    fecha_trimestre = mes in (3, 6, 9, 12)
 
     linhas = [
         LinhaApuracao("1", "Créditos Totais", linha_1),
@@ -350,7 +435,111 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
         LinhaApuracao("4.3.02", "Crédito Entradas", linha_4_3_02),
 
         LinhaApuracao("5", "Valor a Recolher (2. - 1. - 4.)", linha_5),
-        LinhaApuracao("6", "Saldo Crédito Anterior", linha_6, {"competencia_anterior_id": comp_ant_id}),
-        LinhaApuracao("7", "Valor Recolher Atual (5. - 6.)", linha_7),
+        LinhaApuracao("6", "Saldo Crédito Anterior", linha_6,
+                       {"origem": origem_6, "competencia_anterior_id": comp_ant_id,
+                        "valor_linha_7_competencia_anterior": str(linha_7_anterior)}),
+        LinhaApuracao("7", "Valor Recolher Atual (5. - 6.)", linha_7,
+                       {"fecha_trimestre": fecha_trimestre,
+                        "aviso_zerar_saldo_credor_trimestre":
+                            ("Este é o último mês do trimestre e a apuração fechou credora — pelo Decreto "
+                             "de Crédito Presumido de PE, esse saldo NÃO pode ser transportado para o "
+                             "próximo trimestre: precisa ser zerado com um lançamento de \"Outros Débitos\" "
+                             "(linha 02) direto na Rotina 1025/e-Fisco, no fechamento deste período.")
+                            if (fecha_trimestre and linha_7 < 0) else None}),
     ]
     return linhas
+
+
+# ============================================================================================
+# CONFERÊNCIA COM A ROTINA 1025 (Livro Registro de Apuração do ICMS) — pedido do usuário em 10/08/2026.
+#
+# A Apuração ICMS PE usa linhas próprias (1, 1.1, 1.2... 7), diferentes das linhas oficiais do livro
+# (01 a 14, as mesmas que o ICMS Normal usa 1 pra 1 — ver comparar_com_checkpoint_1025 em
+# calculo_icms_normal.py). Aqui é preciso MAPEAR as linhas da Apuração PE para as linhas do livro antes de
+# comparar. Mapeamento validado ao centavo em 10/08/2026 contra o PDF real da Rotina 1025 da Ultra Comércio,
+# competência 05/2026 (fornecido pelo usuário):
+#
+#   livro 04 (Subtotal Débito)              = PE 2       (Débitos Totais)
+#   livro 05 (Entradas com crédito)         = PE 1.1     (Créditos Entradas - Devoluções)
+#   livro 06 (Outros Créditos)              = PE 1.2 + 1.3 + 4   (antecipação do mês anterior + crédito
+#                                              presumido calculado — confirmado pelo usuário: "o credito de
+#                                              1,1% e 6% do periodo anterior entram na apuração como
+#                                              credito, além disso o credito presumido calculado entra na
+#                                              apuração" — no PDF de 05/2026 essas 3 parcelas, 5.912,93 +
+#                                              36.054,83 + 127.462,01, somam exatamente os 169.429,77 do
+#                                              "Subtotal outros Créditos")
+#   livro 08 (Subtotal Crédito)             = PE 1 + 4   (Créditos Totais + Crédito Presumido)
+#   livro 09 (Saldo Credor Período Anterior) = -PE 6     (no livro aparece positivo; no nosso modelo a
+#                                              linha 6 já é guardada negativa quando há saldo credor)
+#   livro 10 (Total)                        = livro 08 + livro 09
+#   livro 11/13 (Saldo devedor / Imposto a Recolher) = PE 7 quando PE 7 >= 0 (senão 0)
+#   livro 14 (Saldo Credor a Transportar)   = -PE 7 quando PE 7 < 0 (senão 0)
+#
+# As linhas 01/02/03/07/12 do livro não têm um mapeamento confiável no modelo de Crédito Presumido (não há,
+# por exemplo, um "Estorno de Créditos" nem "Outros Débitos" discriminado separadamente na Apuração PE) —
+# aparecem na comparação só como referência (valor do PDF), sem comparação automática.
+# ============================================================================================
+
+_LIVRO_1025_LABELS = {
+    "01": "Por Saídas/Prestações com débito do imposto",
+    "02": "Outros Débitos",
+    "03": "Estorno de Créditos",
+    "04": "Subtotal Débito",
+    "05": "Por Entradas/Aquisições com crédito do imposto",
+    "06": "Outros Créditos",
+    "07": "Estorno de Débitos",
+    "08": "Subtotal Crédito",
+    "09": "Saldo Credor do Período Anterior",
+    "10": "Total",
+    "11": "Saldo Devedor (Débito Menos Crédito)",
+    "12": "Deduções",
+    "13": "Imposto a Recolher",
+    "14": "Saldo Credor a Transportar",
+}
+
+
+def comparar_com_checkpoint_1025_pe(session, competencia_id: int) -> list[dict]:
+    """Compara a Apuração ICMS PE já calculada (apuracao_linhas) contra os valores do livro oficial (Rotina
+    1025) importados/digitados em checkpoints_referencia (fonte='rotina_1025') — ver mapeamento na docstring
+    acima. Devolve uma linha por código do livro (01 a 14), com valor_calc=None para as linhas sem
+    mapeamento confiável neste regime. Lista vazia se a apuração ainda não foi calculada."""
+    linhas_calc = {r["linha"]: _to_decimal(r["valor"]) for r in session.execute(text(
+        "select linha, valor from apuracao_linhas where competencia_id = :cid"
+    ), {"cid": competencia_id}).mappings().all()}
+    if not linhas_calc:
+        return []
+
+    linhas_ref = {r["linha"]: _to_decimal(r["valor_icms"]) for r in session.execute(text(
+        "select linha, valor_icms from checkpoints_referencia "
+        "where competencia_id = :cid and fonte = 'rotina_1025'"
+    ), {"cid": competencia_id}).mappings().all()}
+
+    def g(cod):
+        return linhas_calc.get(cod, Decimal("0"))
+
+    saldo_7 = g("7")
+    calc = {
+        "04": g("2"),
+        "05": g("1.1"),
+        "06": g("1.2") + g("1.3") + g("4"),
+        "08": g("1") + g("4"),
+        "09": -g("6"),  # linha 6 já é <= 0 no nosso modelo (0 ou saldo credor negativo)
+    }
+    calc["10"] = calc["08"] + calc["09"]
+    if saldo_7 >= 0:
+        calc["11"] = calc["13"] = saldo_7
+        calc["14"] = Decimal("0")
+    else:
+        calc["11"] = calc["13"] = Decimal("0")
+        calc["14"] = -saldo_7
+
+    resultado = []
+    for cod, label in _LIVRO_1025_LABELS.items():
+        valor_ref = linhas_ref.get(cod)
+        valor_calc = calc.get(cod)
+        diff = (valor_calc - valor_ref) if (valor_calc is not None and valor_ref is not None) else None
+        resultado.append({
+            "linha": cod, "descricao": label, "valor_calc": valor_calc, "valor_ref": valor_ref, "diff": diff,
+            "mapeado": valor_calc is not None,
+        })
+    return resultado

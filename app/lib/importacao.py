@@ -122,6 +122,29 @@ def _preparar_dataframe(arquivo, tipo_operacao, competencia_id):
         )
     df.columns = cols
 
+    # Linhas de rodapé do export Winthor (ex: "Total geral" no fim do relatório) vêm com quase todas as
+    # colunas em branco, inclusive o CFOP — antes disso travava a importação inteira em ".astype(int)" com
+    # o erro "Cannot convert non-finite values (NA or inf) to integer" (relatado pelo usuário em 10/08/2026,
+    # arquivo de Entrada/Saída). Descarta automaticamente só as linhas sem CFOP que também não têm
+    # parceiro/NF preenchidos (claramente não são um item fiscal de verdade, é rodapé/linha em branco). Se
+    # sobrar alguma linha com CFOP vazio mas com parceiro ou NF preenchidos, trava a importação com um erro
+    # explicando qual linha — mais seguro que gravar um item fiscal sem CFOP ou adivinhar um valor.
+    _cfop_vazio = pd.to_numeric(df["cfop"], errors="coerce").isna()
+    if _cfop_vazio.any():
+        _sem_dado = _cfop_vazio & df["parceiro"].isna() & (
+            df["nf_numero"].isna() | (df["nf_numero"].astype(str).str.strip() == "")
+        )
+        _com_dado = _cfop_vazio & ~_sem_dado
+        if _com_dado.any():
+            exemplos = df.loc[_com_dado, ["parceiro", "nf_numero", "produto"]].head(5).to_dict("records")
+            raise ValueError(
+                f"{int(_com_dado.sum())} linha(s) do arquivo de {tipo_operacao} têm CFOP vazio/inválido mas "
+                f"parecem ser itens de verdade (têm parceiro ou NF preenchidos) — confira o arquivo antes de "
+                f"importar. Exemplos: {exemplos}"
+            )
+        if _sem_dado.any():
+            df = df.loc[~_sem_dado].reset_index(drop=True)
+
     colunas_extra = [c for c in cols if c.startswith("_")]
     # Monta a partir de uma coluna real primeiro (fixa o número de linhas/índice do DataFrame) — atribuir
     # um escalar (competencia_id, tipo_operacao) direto num DataFrame ainda vazio não funciona: o pandas

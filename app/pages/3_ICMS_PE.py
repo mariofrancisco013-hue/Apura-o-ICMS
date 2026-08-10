@@ -9,7 +9,7 @@ from lib.db import get_session
 from lib.importacao import get_or_create_competencia
 from lib.importar_1024 import parse_rotina_1024
 from lib.extrato_antecipado_pe import (
-    parse_extrato_antecipado, salvar_extrato_antecipado, listar_extrato_antecipado,
+    parse_extrato_antecipado, salvar_extrato_antecipado, listar_extrato_antecipado, listar_nao_recuperavel,
 )
 from lib.cfops_antecipacao_pe import listar_cfops_antecipacao, salvar_cfops_antecipacao
 from lib.calculo_icms_pe import (
@@ -17,8 +17,12 @@ from lib.calculo_icms_pe import (
     sugerir_valor_4101, carregar_valor_4101_manual, salvar_valor_4101_manual,
     carregar_valor_manual_pe, salvar_valor_manual_pe, remover_valor_manual_pe,
     competencia_anterior_id, calcular_apuracao_pe,
+    listar_cfops_transferencia_checkpoint, carregar_confirmacao, salvar_confirmacao,
+    comparar_com_checkpoint_1025_pe,
 )
 from lib.calculo_icms_normal import salvar_apuracao
+from lib.importar_1025 import parse_rotina_1025
+from lib.planilha import salvar_checkpoint_1025_bulk
 from lib.formatacao import formatar_moeda, coluna_moeda
 from sqlalchemy import text
 
@@ -50,8 +54,9 @@ empresa_id = empresa["id"]
 status = session.execute(text("select status from competencias where id = :cid"), {"cid": cid}).scalar()
 st.caption(f"Competência: **{empresa['razao_social']} — {mes:02d}/{ano}** (status: {status}).")
 
-(aba_1024, aba_extrato, aba_cfops, aba_apuracao) = st.tabs([
-    "📥 Rotina 1024", "📄 Extrato de ICMS Antecipado", "🔖 CFOPs de Antecipação", "📋 Apuração",
+(aba_1024, aba_extrato, aba_nao_recuperavel, aba_cfops, aba_apuracao) = st.tabs([
+    "📥 Rotina 1024", "📄 Extrato de ICMS Antecipado", "🚫 Não Recuperável (Extrato Fronteira)",
+    "🔖 CFOPs de Antecipação", "📋 Apuração",
 ])
 
 # ============================================================================================
@@ -86,6 +91,53 @@ with aba_1024:
             use_container_width=True,
         )
 
+    # --------------------------------------------------------------------------------------
+    # Conferência de CFOPs de transferência (pedido do usuário em 10/08/2026) — ao contrário do ICMS
+    # Normal, o modelo de Crédito Presumido soma CFOP de transferência junto com os demais nas linhas
+    # normais, então um CFOP de transferência errado na Rotina 1024 pode distorcer a apuração sem aviso
+    # nenhum. Trava o cálculo (ver aba Apuração) até o analista confirmar explicitamente.
+    # --------------------------------------------------------------------------------------
+    cfops_transf = listar_cfops_transferencia_checkpoint(session, cid)
+    if cfops_transf:
+        confirmacao = carregar_confirmacao(session, cid, "cfop_transferencia_pe")
+        st.markdown("---")
+        if confirmacao is None:
+            st.warning(
+                f"⚠️ {len(cfops_transf)} CFOP(s) de transferência encontrado(s) na Rotina 1024 importada "
+                f"(Entrada e/ou Saída) — confira se estão corretos antes de calcular a apuração."
+            )
+            st.dataframe(
+                pd.DataFrame(cfops_transf).assign(
+                    valor_contabil=lambda d: d["valor_contabil"].apply(formatar_moeda)
+                )[["direcao", "cfop", "descricao", "valor_contabil"]],
+                use_container_width=True,
+            )
+            c_conf1, c_conf2 = st.columns(2)
+            if c_conf1.button("✅ Sim, está correto", key="confirmar_transf_sim"):
+                salvar_confirmacao(session, cid, "cfop_transferencia_pe", True, usuario=usuario_atual())
+                st.rerun()
+            if c_conf2.button("❌ Não, preciso corrigir", key="confirmar_transf_nao"):
+                salvar_confirmacao(session, cid, "cfop_transferencia_pe", False, usuario=usuario_atual())
+                st.rerun()
+        elif confirmacao["confirmado"]:
+            st.success(
+                f"✅ CFOPs de transferência conferidos por {confirmacao['confirmado_por_email'] or '—'} "
+                f"em {confirmacao['confirmado_em']:%d/%m/%Y %H:%M}."
+            )
+        else:
+            st.error(
+                f"❌ Os CFOPs de transferência abaixo foram marcados como **incorretos** por "
+                f"{confirmacao['confirmado_por_email'] or '—'} em "
+                f"{confirmacao['confirmado_em']:%d/%m/%Y %H:%M} — reimporte a Rotina 1024 corrigida acima "
+                f"(a reimportação já pede uma nova conferência automaticamente)."
+            )
+            st.dataframe(
+                pd.DataFrame(cfops_transf).assign(
+                    valor_contabil=lambda d: d["valor_contabil"].apply(formatar_moeda)
+                )[["direcao", "cfop", "descricao", "valor_contabil"]],
+                use_container_width=True,
+            )
+
 # ============================================================================================
 with aba_extrato:
     st.caption(
@@ -116,6 +168,28 @@ with aba_extrato:
         )
         total = df_extrato.loc[df_extrato["direito_credito"], "icms_devido"].sum()
         st.metric("Total com Direito a Crédito (= linha 3.2)", formatar_moeda(total))
+
+# ============================================================================================
+with aba_nao_recuperavel:
+    st.markdown(
+        "**Para que serve esta aba:** valores do Extrato de ICMS Antecipado (e-Fisco/PE) marcados com "
+        "\"Direito a Crédito\" = **Não** — são grupos de mercadoria em que o ICMS Antecipado foi pago mas "
+        "**não gera crédito nenhum** (é imposto pago e perdido). Por isso NÃO entram na linha 3.2 nem em "
+        "nenhuma outra linha da Apuração ICMS PE, e também não aparecem na Rotina 1025 — ficam só aqui, "
+        "separados, pra dar visibilidade e permitir conferir se vale revisar a classificação do grupo junto "
+        "à Sefaz/PE. Pedido do usuário em 10/08/2026."
+    )
+    df_nao_recuperavel = listar_nao_recuperavel(session, cid)
+    if df_nao_recuperavel.empty:
+        st.info("Nenhum grupo sem direito a crédito nesta competência (ou o Extrato ainda não foi "
+                "importado — veja a aba \"Extrato de ICMS Antecipado\").")
+    else:
+        st.dataframe(
+            df_nao_recuperavel.assign(icms_devido=df_nao_recuperavel["icms_devido"].apply(formatar_moeda)),
+            use_container_width=True,
+        )
+        total_nao_recuperavel = df_nao_recuperavel["icms_devido"].sum()
+        st.metric("Total não recuperável (fora da apuração)", formatar_moeda(total_nao_recuperavel))
 
 # ============================================================================================
 with aba_cfops:
@@ -228,7 +302,17 @@ with aba_apuracao:
         st.rerun()
 
     st.markdown("---")
-    if st.button("🧮 Calcular apuração", type="primary"):
+    # Trava o cálculo se houver CFOP de transferência pendente de conferência (aba Rotina 1024) — pedido
+    # do usuário em 10/08/2026, ver listar_cfops_transferencia_checkpoint/carregar_confirmacao.
+    _cfops_transf_pendente = listar_cfops_transferencia_checkpoint(session, cid)
+    _confirmacao_transf = carregar_confirmacao(session, cid, "cfop_transferencia_pe") if _cfops_transf_pendente else None
+    _bloqueado_transf = bool(_cfops_transf_pendente) and not (_confirmacao_transf and _confirmacao_transf["confirmado"])
+    if _bloqueado_transf:
+        st.warning(
+            "⚠️ Há CFOP(s) de transferência pendente(s) de conferência (aba **📥 Rotina 1024**) — confirme "
+            "se estão corretos antes de calcular a apuração."
+        )
+    if st.button("🧮 Calcular apuração", type="primary", disabled=_bloqueado_transf):
         with st.spinner("Calculando..."):
             linhas = calcular_apuracao_pe(session, cid, empresa_id, int(ano), int(mes),
                                            valor_4101_manual=valor_4101)
@@ -239,7 +323,7 @@ with aba_apuracao:
         st.rerun()
 
     linhas_db = {r["linha"]: r for r in session.execute(text("""
-        select linha, descricao, valor from apuracao_linhas where competencia_id = :cid
+        select linha, descricao, valor, detalhe from apuracao_linhas where competencia_id = :cid
     """), {"cid": cid}).mappings().all()}
 
     if not linhas_db:
@@ -304,7 +388,69 @@ with aba_apuracao:
         ]))
 
         valor_7 = _linha("7")
-        if valor_7 and valor_7 < 0:
+        detalhe_7 = (linhas_db.get("7") or {}).get("detalhe") or {}
+        aviso_trimestre = detalhe_7.get("aviso_zerar_saldo_credor_trimestre")
+        if aviso_trimestre:
+            st.error(
+                f"🔔 {aviso_trimestre} Valor a zerar com o lançamento de \"Outros Débitos\": "
+                f"{formatar_moeda(-valor_7)}."
+            )
+        elif valor_7 and valor_7 < 0:
             st.success(f"Saldo credor a transportar para o mês seguinte: {formatar_moeda(-valor_7)}.")
         elif valor_7:
             st.warning(f"Valor a recolher neste mês: {formatar_moeda(valor_7)}.")
+
+        # ----------------------------------------------------------------------------------
+        # Conferência com a Rotina 1025 (Livro Registro de Apuração do ICMS) — pedido do usuário em
+        # 10/08/2026. Mapeamento das linhas próprias da Apuração PE para as linhas oficiais do livro
+        # validado ao centavo contra um PDF real (ver docstring de comparar_com_checkpoint_1025_pe em
+        # app/lib/calculo_icms_pe.py).
+        # ----------------------------------------------------------------------------------
+        st.markdown("---")
+        with st.expander("📎 Conferência com a Rotina 1025 (Livro Registro de Apuração)", expanded=False):
+            st.caption(
+                "Anexe o PDF da Rotina 1025 (Livro Registro de Apuração do ICMS) desta competência e "
+                "clique em Importar — preenche as 14 linhas automaticamente, sem digitar, e compara com o "
+                "calculado acima. As linhas 01/02/03/07/12 do livro não têm um mapeamento confiável no "
+                "regime de Crédito Presumido (aparecem só como referência, sem comparação)."
+            )
+            c_up1025_1, c_up1025_2 = st.columns([3, 1])
+            pdf_1025_pe = c_up1025_1.file_uploader(
+                "PDF da Rotina 1025", type=["pdf"], key="upload_1025_pe", label_visibility="collapsed",
+            )
+            if c_up1025_2.button("📥 Importar do PDF", key="importar_1025_pe", disabled=pdf_1025_pe is None):
+                try:
+                    valores_1025 = parse_rotina_1025(pdf_1025_pe)
+                    df_1025_pe = pd.DataFrame([
+                        {"linha": linha, "valor_1025": float(valor)}
+                        for linha, valor in valores_1025.items()
+                    ])
+                    n = salvar_checkpoint_1025_bulk(session, cid, df_1025_pe)
+                    st.success(f"{n} linha(s) importada(s) do PDF da Rotina 1025.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
+            comparacao_1025 = comparar_com_checkpoint_1025_pe(session, cid)
+            if not comparacao_1025:
+                st.info("Ainda não há valores da Rotina 1025 importados/digitados para comparar.")
+            else:
+                divergencias_1025 = [c for c in comparacao_1025 if c["mapeado"] and c["diff"] is not None
+                                      and abs(c["diff"]) > 0.05]
+                df_comp = pd.DataFrame([
+                    {
+                        "Linha": c["linha"], "Descrição": c["descricao"],
+                        "Calculado (PE)": formatar_moeda(c["valor_calc"]) if c["mapeado"] else "—",
+                        "Rotina 1025": formatar_moeda(c["valor_ref"]) if c["valor_ref"] is not None else "—",
+                        "Diferença": formatar_moeda(c["diff"]) if c["diff"] is not None else "—",
+                    }
+                    for c in comparacao_1025
+                ]).set_index("Linha")
+                st.table(df_comp)
+                if divergencias_1025:
+                    st.error(
+                        f"⚠️ {len(divergencias_1025)} linha(s) divergente(s) (diferença > R$ 0,05) entre o "
+                        f"calculado e a Rotina 1025 — confira."
+                    )
+                else:
+                    st.success("Tudo bate com a Rotina 1025 (nas linhas com comparação automática).")
