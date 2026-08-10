@@ -418,10 +418,10 @@ with aba_apuracao:
 
         valor_7 = _linha("7")
         detalhe_7 = (linhas_db.get("7") or {}).get("detalhe") or {}
-        aviso_trimestre = detalhe_7.get("aviso_zerar_saldo_credor_trimestre")
-        if aviso_trimestre:
+        aviso_semestre = detalhe_7.get("aviso_zerar_saldo_credor_semestre")
+        if aviso_semestre:
             st.error(
-                f"🔔 {aviso_trimestre} Valor a zerar com o lançamento de \"Outros Débitos\": "
+                f"🔔 {aviso_semestre} Valor a zerar com o lançamento de \"Outros Débitos\": "
                 f"{formatar_moeda(-valor_7)}."
             )
         elif valor_7 and valor_7 < 0:

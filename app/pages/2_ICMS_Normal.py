@@ -23,6 +23,7 @@ from lib.cfops_sem_validacao import (
 )
 from lib.importar_1024 import parse_rotina_1024
 from lib.importar_1025 import parse_rotina_1025
+from lib.conferencia_detalhada_1024 import comparar_relatorio_com_sistema
 from lib.formatacao import formatar_moeda, coluna_moeda
 from lib.status_apuracao import status_competencia
 from sqlalchemy import text
@@ -399,6 +400,53 @@ def _aba_planilha(tipo_operacao, titulo):
                     )
                     st.success(f"CFOP {cfop_marcar} marcado como sem validação.")
                     st.rerun()
+
+            with st.expander("🔎 Conferir divergência com o relatório detalhado (PIS/COFINS e ICMS)"):
+                st.caption(
+                    "Anexe o \"Relatório de conferência PIS/COFINS e ICMS\" do Winthor (filtrado pelo CFOP "
+                    "divergente) para ver exatamente em qual nota/item está a diferença. Só é usado nesta "
+                    "hora, para mostrar o resultado abaixo — nada deste arquivo ou da comparação fica "
+                    "salvo no banco."
+                )
+                arq_conf = st.file_uploader(
+                    "Relatório de conferência PIS/COFINS e ICMS (.xls)", type=["xls"],
+                    key=f"upload_conf_pc_{tipo_operacao}",
+                )
+                if st.button("Conferir divergência", key=f"btn_conf_pc_{tipo_operacao}",
+                              disabled=arq_conf is None):
+                    try:
+                        divergentes_item, comparado_item = comparar_relatorio_com_sistema(
+                            session, cid, tipo_operacao, arq_conf
+                        )
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        if divergentes_item.empty:
+                            st.success(
+                                "Nenhuma diferença encontrada item a item entre o relatório enviado e o "
+                                "que está importado no sistema, para o(s) CFOP(s) deste arquivo."
+                            )
+                        else:
+                            st.warning(
+                                f"{len(divergentes_item)} item(ns) com diferença — CFOP(s) no relatório: "
+                                f"{', '.join(str(c) for c in sorted(divergentes_item['cfop'].unique()))}."
+                            )
+                            st.dataframe(
+                                _formatar_moeda_df(
+                                    divergentes_item[[
+                                        "cfop", "nf_numero", "produto_codigo", "produto_descricao",
+                                        "situacao", "diff_base", "diff_icms",
+                                    ]],
+                                    ["diff_base", "diff_icms"],
+                                ),
+                                use_container_width=True,
+                            )
+                            st.caption(
+                                "\"Só no relatório enviado\" = item que está no relatório mas não foi "
+                                "encontrado importado no sistema para essa NF/produto/CFOP. \"Só no "
+                                "sistema\" = o contrário. \"Valor diferente\" = o item existe dos dois "
+                                "lados mas a base ou o ICMS não batem."
+                            )
         elif ref_editado["base_1024"].notna().any():
             st.success("Tudo bateu com os valores da Rotina 1024 informados "
                        "(fora os CFOPs marcados como sem validação, se houver).")

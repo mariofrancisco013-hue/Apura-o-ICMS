@@ -279,15 +279,15 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
     pra sobrescrever — necessário, por exemplo, na primeira competência cadastrada pra essa empresa, onde
     não existe "mês anterior" dentro do sistema pra encadear.
 
-    Linha 6 (Saldo Crédito Anterior) — regra de trimestre (pedido do usuário em 10/08/2026): pelo Decreto
-    de Crédito Presumido de PE, saldo credor não pode ser transportado de um trimestre pro outro, tem que
-    ser zerado com um lançamento de "Outros Débitos" na própria Rotina 1025/e-Fisco no fechamento de
-    março/junho/setembro/dezembro. Por isso o encadeamento automático da linha 6 NUNCA atravessa essa
-    fronteira: se a competência anterior era um desses quatro meses, a linha 6 desta competência começa
-    zerada mesmo que aquela tenha fechado credora. E se ESTA competência é um desses quatro meses e fecha
-    credora, a linha 7 vem com um aviso (`detalhe["aviso_zerar_saldo_credor_trimestre"]`) pra lembrar o
-    analista de fazer esse lançamento antes de fechar o período — ver o aviso também na tela (aba
-    Apuração)."""
+    Linha 6 (Saldo Crédito Anterior) — regra de semestre (pedido do usuário em 10/08/2026, corrigido no
+    mesmo dia: é semestral, não trimestral): pelo Decreto de Crédito Presumido de PE, saldo credor não pode
+    ser transportado de um semestre pro outro, tem que ser zerado com um lançamento de "Outros Débitos" na
+    própria Rotina 1025/e-Fisco no fechamento de junho e dezembro. Por isso o encadeamento automático da
+    linha 6 NUNCA atravessa essa fronteira: se a competência anterior era junho ou dezembro, a linha 6
+    desta competência começa zerada mesmo que aquela tenha fechado credora. E se ESTA competência é junho
+    ou dezembro e fecha credora, a linha 7 vem com um aviso
+    (`detalhe["aviso_zerar_saldo_credor_semestre"]`) pra lembrar o analista de fazer esse lançamento antes
+    de fechar o período — ver o aviso também na tela (aba Apuração)."""
     entrada = _cfops_presentes(session, competencia_id, (1, 2, 3))
     saida = _cfops_presentes(session, competencia_id, (5, 6, 7))
     buckets = cfops_por_bucket(session, empresa_id)  # {"interna": [cfop,...], "externa": [cfop,...]}
@@ -374,18 +374,19 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
     linha_5 = linha_2 - linha_1 - linha_4
     linha_7_anterior = _valor_linha(session, comp_ant_id, "7") if comp_ant_id else Decimal("0")
 
-    # Regra do Decreto de Crédito Presumido de PE (pedido do usuário em 10/08/2026): saldo credor NÃO pode
-    # ser transportado de um trimestre pro outro — tem que ser zerado com um lançamento de "Outros Débitos"
-    # (linha 02) direto na Rotina 1025/e-Fisco, sempre no último mês do trimestre (março/junho/setembro/
-    # dezembro). Por isso, se a competência ANTERIOR era o último mês de um trimestre, o encadeamento
-    # automático da linha 6 pára aí — mesmo que ela tenha fechado credora, não carrega esse saldo pra cá
-    # (esse saldo já deveria ter sido zerado no e-Fisco antes de fechar aquele trimestre; ver aviso na tela
-    # de Apuração quando ESTA competência for de fechamento de trimestre e fechar credora).
+    # Regra do Decreto de Crédito Presumido de PE (pedido do usuário em 10/08/2026, corrigido no mesmo dia:
+    # é SEMESTRAL — meses 06 e 12 — não trimestral): saldo credor NÃO pode ser transportado de um semestre
+    # pro outro — tem que ser zerado com um lançamento de "Outros Débitos" (linha 02) direto na Rotina
+    # 1025/e-Fisco, sempre no fechamento de junho e dezembro. Por isso, se a competência ANTERIOR era junho
+    # ou dezembro, o encadeamento automático da linha 6 pára aí — mesmo que ela tenha fechado credora, não
+    # carrega esse saldo pra cá (esse saldo já deveria ter sido zerado no e-Fisco antes de fechar aquele
+    # semestre; ver aviso na tela de Apuração quando ESTA competência for de fechamento de semestre e
+    # fechar credora).
     mes_anterior = 12 if mes == 1 else mes - 1
-    zerado_por_trimestre = mes_anterior in (3, 6, 9, 12)
-    if zerado_por_trimestre:
+    zerado_por_semestre = mes_anterior in (6, 12)
+    if zerado_por_semestre:
         linha_6 = Decimal("0")
-        origem_6 = "zerado_fechamento_trimestre"
+        origem_6 = "zerado_fechamento_semestre"
     else:
         # só carrega saldo pra frente se a competência anterior fechou credora (valor negativo = "a
         # recolher" negativo, ou seja, saldo credor); se fechou devedora (>=0, já recolhida), não há saldo
@@ -393,7 +394,7 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
         linha_6 = linha_7_anterior if linha_7_anterior < 0 else Decimal("0")
         origem_6 = "encadeado_competencia_anterior" if comp_ant_id else "sem_competencia_anterior"
     linha_7 = linha_6 + linha_5
-    fecha_trimestre = mes in (3, 6, 9, 12)
+    fecha_semestre = mes in (6, 12)
 
     linhas = [
         LinhaApuracao("1", "Créditos Totais", linha_1),
@@ -439,13 +440,14 @@ def calcular_apuracao_pe(session, competencia_id: int, empresa_id: int, ano: int
                        {"origem": origem_6, "competencia_anterior_id": comp_ant_id,
                         "valor_linha_7_competencia_anterior": str(linha_7_anterior)}),
         LinhaApuracao("7", "Valor Recolher Atual (5. - 6.)", linha_7,
-                       {"fecha_trimestre": fecha_trimestre,
-                        "aviso_zerar_saldo_credor_trimestre":
-                            ("Este é o último mês do trimestre e a apuração fechou credora — pelo Decreto "
-                             "de Crédito Presumido de PE, esse saldo NÃO pode ser transportado para o "
-                             "próximo trimestre: precisa ser zerado com um lançamento de \"Outros Débitos\" "
-                             "(linha 02) direto na Rotina 1025/e-Fisco, no fechamento deste período.")
-                            if (fecha_trimestre and linha_7 < 0) else None}),
+                       {"fecha_semestre": fecha_semestre,
+                        "aviso_zerar_saldo_credor_semestre":
+                            ("Este é o último mês do semestre (junho ou dezembro) e a apuração fechou "
+                             "credora — pelo Decreto de Crédito Presumido de PE, esse saldo NÃO pode ser "
+                             "transportado para o próximo semestre: precisa ser zerado com um lançamento "
+                             "de \"Outros Débitos\" (linha 02) direto na Rotina 1025/e-Fisco, no "
+                             "fechamento deste período.")
+                            if (fecha_semestre and linha_7 < 0) else None}),
     ]
     return linhas
 
