@@ -321,15 +321,19 @@ def carregar_sefaz_lancamentos(session, competencia_id: int) -> pd.DataFrame:
 
 
 def comparar_1076_sefaz(session, competencia_id: int, receita_filtro: str = "1031") -> pd.DataFrame:
-    """O núcleo do 1º passo pedido pelo usuário: por NF, compara o que a SEFAZ está cobrando (soma de
-    "calculado", só da Receita informada em receita_filtro — '1031' = ICMS ST Interestadual, confirmado com
-    o usuário) contra o que já está no sistema (soma de "valor_icms_st" da Rotina 1076 para a mesma NF).
+    """O núcleo da aba **Interestadual**: por NF, compara o que a SEFAZ está cobrando (soma de "calculado",
+    só da Receita informada em receita_filtro — '1031' = ICMS ST Interestadual, confirmado com o usuário)
+    contra o que já está no sistema (soma de "valor_icms_st" da Rotina 1076 para a mesma NF).
 
     Modelado diretamente na aba "SEFAZ" da planilha manual de apuração do usuário (colunas NF, CALCULO,
     "ICM A PAGAR (SUPPLY)", DIFERENÇA) — mesma lógica, automatizada.
 
-    Devolve um DataFrame com uma linha por NF (união das NFs da SEFAZ filtradas + das NFs da 1076) e as
-    colunas: nf_numero, sefaz_calculado, sistema_valor_icms_st, diferenca, status. status é:
+    Só entram NFs de fora do Ceará (uf != 'CE') — pedido do usuário em 11/08/2026: "o relatorio da sefaz só
+    serve para comprar as de fora do estado do Ceara, as internas deve ser tratada com base na informação
+    da planilha em anexa" (ver listar_1076_interno, a aba **Interno**, para as NFs de dentro do estado).
+
+    Devolve um DataFrame com uma linha por NF (união das NFs da SEFAZ filtradas + das NFs da 1076 fora do
+    Ceará) e as colunas: nf_numero, sefaz_calculado, sistema_valor_icms_st, diferenca, status. status é:
     - "Pendente de entrada": a SEFAZ está cobrando mas a NF não aparece na Rotina 1076 (nem um item) — a
       nota ainda não foi lançada no Winthor.
     - "Divergente": a NF aparece nas duas, mas os valores não batem (fora da TOLERANCIA).
@@ -338,6 +342,7 @@ def comparar_1076_sefaz(session, competencia_id: int, receita_filtro: str = "103
       informativo (pode ser NF de outra receita, ou lançamento da SEFAZ ainda não disponibilizado)."""
     sefaz = carregar_sefaz_lancamentos(session, competencia_id)
     rotina = carregar_rotina_1076(session, competencia_id)
+    rotina = rotina[rotina["uf"] != "CE"] if not rotina.empty else rotina
 
     sefaz_filtrado = sefaz[sefaz["receita"] == str(receita_filtro)] if not sefaz.empty else sefaz
     sefaz_agg = (
@@ -377,3 +382,132 @@ def comparar_1076_sefaz(session, competencia_id: int, receita_filtro: str = "103
         ),
     ).reset_index(drop=True)
     return comp[["nf_numero", "sefaz_calculado", "sistema_valor_icms_st", "diferenca", "status"]]
+
+
+# ==============================================================================================
+# Aba Interno — NFs de dentro do Ceará (uf = 'CE'), pedido do usuário em 11/08/2026.
+#
+# Investigação (planilha manual "ICMS INTERNO" do usuário, seção "4. OPERAÇÕES INTERNAS", + material de
+# apoio "TRIBUTAÇÃO 2024.xlsx" com a tabela de carga líquida do Decreto ICMS Nº 29.560/CE): a princípio
+# parecia que a planilha recalculava o ICMS ST com uma fórmula própria (base × "percentual de agregação",
+# mais um ajuste quando o fornecedor é Optante do Simples Nacional) — mas conferindo os números batendo
+# exato, ficou confirmado que a Rotina 1076 JÁ aplica a alíquota certa na entrada, incluindo o adicional de
+# Simples Nacional quando é o caso:
+#
+#   NF 15525 (CAPY, optante do Simples): base R$ 5.599,70. A planilha calcula ICMS(1) = base × 4,08%
+#   (alíquota "normal", mesma categoria/origem) = R$ 228,468, mais um "ajuste (2)" de R$ 167,991 por ser
+#   optante do Simples — total R$ 396,459. Ao cruzar com a tabela do Decreto 29.560/CE: 4,08% é a linha
+#   "20% - Demais mercadorias, própria estado" da tabela NORMAL; o "ajuste" de 3% é exatamente a linha
+#   ADICIONAL da tabela SIMPLES NACIONAL para a mesma categoria/origem (3% × 5.599,70 = R$ 167,991, batendo
+#   exato); e 4,08% + 3% = 7,08% é EXATAMENTE a alíquota que a Rotina 1076 já usou nessa NF (aliq_st=7,08).
+#   Ou seja: o "ICMS(1) + ajuste(2)" da planilha é só a mesma conta que a 1076 já fez de uma vez só — não
+#   falta nada pra calcular por fora.
+#
+# Por isso, confirmado com o usuário ("traga com a aliquota que consta na 1076"): a aba Interno NÃO
+# recalcula nada — só agrupa por NF os itens/linhas da Rotina 1076 com uf = 'CE', do jeito que a planilha
+# do usuário agrupa (Fornecedor, NF, Data de Entrada, Base de Cálculo, Alíquota, ICMS ST). O cadastro de
+# fornecedores (CNPJ -> Optante do Simples, ver `cadastro_fornecedores_st` / Plan1 da planilha do usuário)
+# entra só como informação de apoio/auditoria — não afeta o valor calculado, que já vem pronto da 1076.
+# ==============================================================================================
+
+COLS_CADASTRO_FORNECEDORES_ST = ["cnpj", "razao_social", "simples"]
+
+
+def parse_cadastro_fornecedores_st(arquivo, sheet_name: str = "Plan1") -> pd.DataFrame:
+    """Lê a aba de cadastro de fornecedores (CNPJ, Razão Social, Optante do Simples) da planilha manual do
+    usuário — no arquivo "ICMS INTERNO" essa aba se chama "Plan1", com um cabeçalho de verdade a partir da
+    linha "CNPJ | RAZÃO SOCIAL | SIMPLES" (as primeiras linhas da aba costumam vir em branco). Um mesmo
+    CNPJ pode aparecer mais de uma vez (linhas duplicadas/atualizadas na planilha do usuário) — fica só a
+    última ocorrência."""
+    df = pd.read_excel(arquivo, sheet_name=sheet_name, header=None, engine="calamine")
+    idx_cabecalho = None
+    for i in range(len(df)):
+        linha = df.iloc[i].astype(str).str.strip().str.upper().tolist()
+        if "CNPJ" in linha and "RAZÃO SOCIAL" in linha:
+            idx_cabecalho = i
+            break
+    if idx_cabecalho is None:
+        raise ValueError(
+            f"Não encontrei o cabeçalho \"CNPJ | RAZÃO SOCIAL | SIMPLES\" na aba \"{sheet_name}\" deste "
+            f"arquivo — confira se é a planilha certa (cadastro de fornecedores, com Optante do Simples)."
+        )
+    cabecalho = df.iloc[idx_cabecalho].astype(str).str.strip().str.upper().tolist()
+    dados = df.iloc[idx_cabecalho + 1:].copy()
+    dados.columns = cabecalho
+    idx_cnpj = cabecalho.index("CNPJ")
+    idx_razao = cabecalho.index("RAZÃO SOCIAL")
+    idx_simples = cabecalho.index("SIMPLES")
+
+    out = pd.DataFrame({"cnpj": dados.iloc[:, idx_cnpj].astype(str).str.strip()})
+    out["razao_social"] = dados.iloc[:, idx_razao].astype(str).str.strip()
+    out["simples"] = dados.iloc[:, idx_simples].astype(str).str.strip()
+    out = out[out["cnpj"].notna() & (out["cnpj"] != "") & (out["cnpj"].str.lower() != "nan")]
+    out = out.drop_duplicates(subset="cnpj", keep="last").reset_index(drop=True)
+    return out[COLS_CADASTRO_FORNECEDORES_ST]
+
+
+def salvar_cadastro_fornecedores_st(session, df: pd.DataFrame) -> int:
+    """Cadastro GLOBAL (não é por competência, igual o cadastro de CFOP) — upsert por CNPJ: atualiza quem
+    já existe, insere quem é novo, sem apagar fornecedores que não vieram nesta importação (a planilha do
+    usuário pode não trazer o cadastro inteiro toda vez)."""
+    for _, row in df.iterrows():
+        session.execute(text("""
+            insert into cadastro_fornecedores_st (cnpj, razao_social, simples, atualizado_em)
+            values (:cnpj, :razao, :simples, now())
+            on conflict (cnpj) do update set
+                razao_social = excluded.razao_social, simples = excluded.simples, atualizado_em = now()
+        """), {"cnpj": row["cnpj"], "razao": row["razao_social"], "simples": row["simples"]})
+    session.commit()
+    return len(df)
+
+
+def listar_cadastro_fornecedores_st(session) -> pd.DataFrame:
+    rows = session.execute(text("""
+        select cnpj, razao_social, simples from cadastro_fornecedores_st order by razao_social
+    """)).mappings().all()
+    return pd.DataFrame(rows, columns=COLS_CADASTRO_FORNECEDORES_ST)
+
+
+def listar_1076_interno(session, competencia_id: int) -> pd.DataFrame:
+    """Aba Interno: agrupa por NF os itens/linhas da Rotina 1076 com uf = 'CE' (dentro do Ceará) — sem
+    recalcular nada, ver comentário acima do porquê. Devolve uma linha por NF com: nf_numero,
+    fornecedor_nome (só preenchido se a NF veio do layout resumido — o layout item a item não traz
+    fornecedor), fornecedor_cnpj, dt_entrada (a mais antiga, se houver mais de uma linha), base_st_final
+    (soma), aliq_st (média — só é uma alíquota "de verdade" quando todas as linhas da NF usam a mesma;
+    aliq_st_uniforme=False sinaliza quando não é o caso, pra não passar uma média enganosa), valor_icms_st
+    (soma — o valor final, já correto, vindo direto da 1076) e simples (cruzado com
+    cadastro_fornecedores_st pelo CNPJ, só informativo)."""
+    rotina = carregar_rotina_1076(session, competencia_id)
+    rotina = rotina[rotina["uf"] == "CE"] if not rotina.empty else rotina
+    if rotina.empty:
+        return pd.DataFrame(columns=[
+            "nf_numero", "fornecedor_nome", "fornecedor_cnpj", "dt_entrada", "base_st_final", "aliq_st",
+            "aliq_st_uniforme", "valor_icms_st", "simples",
+        ])
+
+    def _agg(grupo):
+        aliqs = grupo["aliq_st"].dropna().unique()
+        return pd.Series({
+            "fornecedor_nome": next((v for v in grupo["fornecedor_nome"] if pd.notna(v) and v), None),
+            "fornecedor_cnpj": next((v for v in grupo["fornecedor_cnpj"] if pd.notna(v) and v), None),
+            "dt_entrada": grupo["dt_entrada"].min(),
+            "base_st_final": grupo["base_st_final"].sum(),
+            "aliq_st": grupo["aliq_st"].mean(),
+            "aliq_st_uniforme": len(aliqs) <= 1,
+            "valor_icms_st": grupo["valor_icms_st"].sum(),
+        })
+
+    agrupado = rotina.groupby("nf_numero").apply(_agg, include_groups=False).reset_index()
+
+    cadastro = listar_cadastro_fornecedores_st(session)
+    if not cadastro.empty:
+        agrupado = agrupado.merge(
+            cadastro[["cnpj", "simples"]], left_on="fornecedor_cnpj", right_on="cnpj", how="left"
+        ).drop(columns=["cnpj"])
+    else:
+        agrupado["simples"] = None
+
+    return agrupado.sort_values("nf_numero").reset_index(drop=True)[[
+        "nf_numero", "fornecedor_nome", "fornecedor_cnpj", "dt_entrada", "base_st_final", "aliq_st",
+        "aliq_st_uniforme", "valor_icms_st", "simples",
+    ]]

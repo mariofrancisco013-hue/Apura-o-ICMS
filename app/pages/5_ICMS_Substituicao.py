@@ -8,7 +8,8 @@ from lib.db import get_session
 from lib.importacao import buscar_competencia, get_or_create_competencia
 from lib.icms_st import (
     parse_rotina_1076, parse_sefaz_lancamentos, salvar_rotina_1076, salvar_sefaz_lancamentos,
-    carregar_rotina_1076, carregar_sefaz_lancamentos, comparar_1076_sefaz,
+    carregar_rotina_1076, carregar_sefaz_lancamentos, comparar_1076_sefaz, listar_1076_interno,
+    parse_cadastro_fornecedores_st, salvar_cadastro_fornecedores_st, listar_cadastro_fornecedores_st,
 )
 from lib.formatacao import formatar_moeda, rotulo_empresa
 from sqlalchemy import text
@@ -17,13 +18,13 @@ import pandas as pd
 st.set_page_config(page_title="ICMS Substituição", layout="wide")
 require_login()
 logout_button()
-st.title("ICMS Substituição Tributária Interestadual")
+st.title("ICMS Substituição Tributária")
 st.caption(
-    "1º passo (pedido do usuário em 10/08/2026): comparar o que a SEFAZ está cobrando de ICMS ST "
-    "Interestadual (relatório de lançamentos do portal) contra o que já está lançado no sistema via "
-    "Rotina 1076 do Winthor, nota a nota — para achar NFs que a SEFAZ já está cobrando mas ainda não "
-    "foram lançadas no Winthor (pendentes de entrada) e NFs com valor calculado divergente do que já está "
-    "no sistema."
+    "Confere a Rotina 1076 do Winthor contra as duas fontes de referência, separadas por origem da "
+    "mercadoria (pedido do usuário em 11/08/2026): **Interestadual** (fornecedor de fora do Ceará) — "
+    "conferido contra o relatório de lançamentos da SEFAZ. **Interno** (fornecedor do Ceará) — a SEFAZ não "
+    "cobra isso à parte, então aqui a Rotina 1076 só é agrupada por NF (o valor de ICMS ST já vem correto "
+    "da 1076, incluindo o adicional de Simples Nacional quando é o caso — ver aba Interno)."
 )
 
 
@@ -78,7 +79,10 @@ st.subheader("Importar relatórios")
 c1, c2 = st.columns(2)
 with c1:
     st.markdown("**Rotina 1076 (Winthor)**")
-    st.caption("Relatório item a item — a mesma NF aparece várias vezes, uma linha por item de entrada.")
+    st.caption(
+        "Aceita os dois layouts do export: item a item (18 colunas) ou resumido por NF (17 colunas, com "
+        "fornecedor) — detecta sozinho qual é."
+    )
     arq_1076 = st.file_uploader("Arquivo da Rotina 1076", type=["xls", "xlsx"], key="upload_1076_st")
     if st.button("📥 Importar Rotina 1076", key="btn_importar_1076", disabled=arq_1076 is None):
         try:
@@ -104,73 +108,141 @@ with c2:
         except ValueError as e:
             st.error(str(e))
 
+with st.expander("Cadastro de fornecedores (Optante do Simples) — opcional, só informativo"):
+    st.caption(
+        "Cadastro GLOBAL (não é por competência) de CNPJ → Razão Social → Optante do Simples Nacional, "
+        "usado só como informação de apoio/auditoria na aba **Interno** — não entra em nenhum cálculo (o "
+        "valor de ICMS ST já vem correto da Rotina 1076). Aceita a aba \"Plan1\" da planilha manual de "
+        "cadastro de fornecedores do usuário (colunas CNPJ, Razão Social, Simples)."
+    )
+    arq_cadastro = st.file_uploader(
+        "Planilha de cadastro de fornecedores", type=["xls", "xlsx"], key="upload_cadastro_fornecedores_st"
+    )
+    if st.button("📥 Importar/atualizar cadastro", key="btn_importar_cadastro_st", disabled=arq_cadastro is None):
+        try:
+            df_cad = parse_cadastro_fornecedores_st(arq_cadastro)
+            n = salvar_cadastro_fornecedores_st(session, df_cad)
+            st.success(f"{n} fornecedor(es) importado(s)/atualizado(s) no cadastro.")
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+    cadastro_atual = listar_cadastro_fornecedores_st(session)
+    st.caption(f"{len(cadastro_atual)} fornecedor(es) cadastrado(s) atualmente.")
+    if not cadastro_atual.empty:
+        st.dataframe(cadastro_atual, use_container_width=True, height=250, hide_index=True)
+
 if cid is None:
     st.info("Importe pelo menos um dos dois relatórios acima para começar.")
     st.stop()
 
 st.markdown("---")
-st.subheader("Comparação Rotina 1076 × SEFAZ")
 
-sefaz_atual = carregar_sefaz_lancamentos(session, cid)
-receita_opcoes = {"1031 — ICMS ST Interestadual": "1031"}
-if not sefaz_atual.empty:
-    for r in sorted(sefaz_atual["receita"].dropna().unique().tolist()):
-        if r not in receita_opcoes.values():
-            receita_opcoes[f"{r} — outra receita"] = r
+aba_interestadual, aba_interno = st.tabs(["🌎 Interestadual (fora do Ceará)", "🏠 Interno (Ceará)"])
 
-receita_escolhida = st.selectbox(
-    "Receita da SEFAZ a comparar", options=list(receita_opcoes.keys()), index=0,
-    help=(
-        "Confirmado com o usuário em 10/08/2026: só a Receita 1031 é ICMS ST Interestadual — as demais "
-        "receitas do relatório da SEFAZ (ex: 1023) ficam gravadas para referência/auditoria, mas fora "
-        "desta comparação por padrão."
-    ),
-)
-receita_filtro = receita_opcoes[receita_escolhida]
+# ============================================================================================
+with aba_interestadual:
+    st.subheader("Comparação Rotina 1076 × SEFAZ — só NFs de fora do Ceará")
 
-comp = comparar_1076_sefaz(session, cid, receita_filtro=receita_filtro)
+    sefaz_atual = carregar_sefaz_lancamentos(session, cid)
+    receita_opcoes = {"1031 — ICMS ST Interestadual": "1031"}
+    if not sefaz_atual.empty:
+        for r in sorted(sefaz_atual["receita"].dropna().unique().tolist()):
+            if r not in receita_opcoes.values():
+                receita_opcoes[f"{r} — outra receita"] = r
 
-if comp.empty:
-    st.info("Nenhum dado para comparar ainda — importe os dois relatórios acima.")
-else:
-    n_pendente = int((comp["status"] == "Pendente de entrada").sum())
-    n_diverg = int((comp["status"] == "Divergente").sum())
-    n_ok = int((comp["status"] == "OK").sum())
-    n_nao_cobrado = int((comp["status"] == "Não cobrado pela SEFAZ").sum())
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("🔴 Pendentes de entrada", n_pendente)
-    m2.metric("🟠 Divergentes", n_diverg)
-    m3.metric("🟢 OK", n_ok)
-    m4.metric("⚪ Não cobrados pela SEFAZ", n_nao_cobrado)
-
-    status_filtro = st.multiselect(
-        "Filtrar por situação",
-        options=["Pendente de entrada", "Divergente", "OK", "Não cobrado pela SEFAZ"],
-        default=["Pendente de entrada", "Divergente"],
+    receita_escolhida = st.selectbox(
+        "Receita da SEFAZ a comparar", options=list(receita_opcoes.keys()), index=0,
+        help=(
+            "Confirmado com o usuário em 10/08/2026: só a Receita 1031 é ICMS ST Interestadual — as demais "
+            "receitas do relatório da SEFAZ (ex: 1023) ficam gravadas para referência/auditoria, mas fora "
+            "desta comparação por padrão."
+        ),
     )
-    comp_exibir = comp[comp["status"].isin(status_filtro)] if status_filtro else comp
+    receita_filtro = receita_opcoes[receita_escolhida]
 
-    tabela = comp_exibir.copy()
-    tabela["sefaz_calculado"] = tabela["sefaz_calculado"].apply(_fmt)
-    tabela["sistema_valor_icms_st"] = tabela["sistema_valor_icms_st"].apply(_fmt)
-    tabela["diferenca"] = tabela["diferenca"].apply(_fmt)
-    tabela = tabela.rename(columns={
-        "nf_numero": "NF",
-        "sefaz_calculado": "SEFAZ (Calculado)",
-        "sistema_valor_icms_st": "Sistema (Rotina 1076)",
-        "diferenca": "Diferença (SEFAZ − Sistema)",
-        "status": "Situação",
-    })
-    st.dataframe(tabela, use_container_width=True, hide_index=True, height=500)
+    comp = comparar_1076_sefaz(session, cid, receita_filtro=receita_filtro)
 
+    if comp.empty:
+        st.info("Nenhum dado para comparar ainda — importe os dois relatórios acima.")
+    else:
+        n_pendente = int((comp["status"] == "Pendente de entrada").sum())
+        n_diverg = int((comp["status"] == "Divergente").sum())
+        n_ok = int((comp["status"] == "OK").sum())
+        n_nao_cobrado = int((comp["status"] == "Não cobrado pela SEFAZ").sum())
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("🔴 Pendentes de entrada", n_pendente)
+        m2.metric("🟠 Divergentes", n_diverg)
+        m3.metric("🟢 OK", n_ok)
+        m4.metric("⚪ Não cobrados pela SEFAZ", n_nao_cobrado)
+
+        status_filtro = st.multiselect(
+            "Filtrar por situação",
+            options=["Pendente de entrada", "Divergente", "OK", "Não cobrado pela SEFAZ"],
+            default=["Pendente de entrada", "Divergente"],
+            key="filtro_status_interestadual",
+        )
+        comp_exibir = comp[comp["status"].isin(status_filtro)] if status_filtro else comp
+
+        tabela = comp_exibir.copy()
+        tabela["sefaz_calculado"] = tabela["sefaz_calculado"].apply(_fmt)
+        tabela["sistema_valor_icms_st"] = tabela["sistema_valor_icms_st"].apply(_fmt)
+        tabela["diferenca"] = tabela["diferenca"].apply(_fmt)
+        tabela = tabela.rename(columns={
+            "nf_numero": "NF",
+            "sefaz_calculado": "SEFAZ (Calculado)",
+            "sistema_valor_icms_st": "Sistema (Rotina 1076)",
+            "diferenca": "Diferença (SEFAZ − Sistema)",
+            "status": "Situação",
+        })
+        st.dataframe(tabela, use_container_width=True, hide_index=True, height=500)
+
+        st.caption(
+            "**Pendente de entrada** — a SEFAZ está cobrando, mas a NF ainda não aparece na Rotina 1076: "
+            "falta lançar no Winthor. **Divergente** — a NF está nas duas fontes, mas o valor não bate "
+            "(diferença acima de R$ 0,05). **OK** — bate. **Não cobrado pela SEFAZ** — aparece na Rotina "
+            "1076 mas sem cobrança nesta Receita (pode ser de outra receita, ou lançamento da SEFAZ ainda "
+            "não disponibilizado no portal)."
+        )
+
+# ============================================================================================
+with aba_interno:
+    st.subheader("Rotina 1076 agrupada por NF — só fornecedores do Ceará")
     st.caption(
-        "**Pendente de entrada** — a SEFAZ está cobrando, mas a NF ainda não aparece na Rotina 1076: "
-        "falta lançar no Winthor. **Divergente** — a NF está nas duas fontes, mas o valor não bate "
-        "(diferença acima de R$ 0,05). **OK** — bate. **Não cobrado pela SEFAZ** — aparece na Rotina 1076 "
-        "mas sem cobrança nesta Receita (pode ser de outra receita, ou lançamento da SEFAZ ainda não "
-        "disponibilizado no portal)."
+        "Não há recálculo aqui: o valor de ICMS ST já vem correto da própria Rotina 1076 (a alíquota "
+        "usada na entrada já inclui o adicional de Simples Nacional quando o fornecedor é optante — "
+        "conferido em 11/08/2026, ver claude/metodologia-icms-st.md no projeto). Esta aba só agrupa por "
+        "NF, do jeito que a planilha manual de \"Operações Internas\" do usuário já faz."
     )
+
+    interno = listar_1076_interno(session, cid)
+    if interno.empty:
+        st.info("Nenhuma NF de fornecedor do Ceará na Rotina 1076 importada para esta competência.")
+    else:
+        st.metric("Total de ICMS ST (Interno)", formatar_moeda(interno["valor_icms_st"].sum()))
+
+        tabela_int = interno.copy()
+        if tabela_int["aliq_st_uniforme"].eq(False).any():
+            st.warning(
+                "Alguma NF tem itens com alíquotas diferentes entre si — a coluna Alíquota mostra a média "
+                "nesses casos (marcado com ⚠️), não uma alíquota única real. O valor de ICMS ST somado "
+                "continua correto (é a soma direta dos itens, não depende da média)."
+            )
+        tabela_int["Alíquota"] = tabela_int.apply(
+            lambda r: f"{r['aliq_st']:.2f}%" + ("" if r["aliq_st_uniforme"] else " ⚠️"), axis=1
+        )
+        tabela_int["base_st_final"] = tabela_int["base_st_final"].apply(_fmt)
+        tabela_int["valor_icms_st"] = tabela_int["valor_icms_st"].apply(_fmt)
+        tabela_int["simples"] = tabela_int["simples"].fillna("—")
+        tabela_int["fornecedor_nome"] = tabela_int["fornecedor_nome"].fillna(
+            "— (só disponível no layout resumido por NF da Rotina 1076)"
+        )
+        tabela_int = tabela_int.rename(columns={
+            "nf_numero": "NF", "fornecedor_nome": "Fornecedor", "fornecedor_cnpj": "CNPJ",
+            "dt_entrada": "Data Entrada", "base_st_final": "Base ST", "valor_icms_st": "ICMS ST",
+            "simples": "Optante Simples",
+        })[["NF", "Fornecedor", "CNPJ", "Data Entrada", "Base ST", "Alíquota", "ICMS ST", "Optante Simples"]]
+        st.dataframe(tabela_int, use_container_width=True, hide_index=True, height=500)
 
 with st.expander("Ver itens importados (detalhe, sem agregação por NF)"):
     aba_1076, aba_sefaz = st.tabs(["Rotina 1076 (itens)", "Lançamentos da SEFAZ"])
