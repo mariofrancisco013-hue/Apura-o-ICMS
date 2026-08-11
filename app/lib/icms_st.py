@@ -413,24 +413,45 @@ def comparar_1076_sefaz(session, competencia_id: int, receita_filtro: str = "103
 COLS_CADASTRO_FORNECEDORES_ST = ["cnpj", "razao_social", "simples"]
 
 
-def parse_cadastro_fornecedores_st(arquivo, sheet_name: str = "Plan1") -> pd.DataFrame:
-    """Lê a aba de cadastro de fornecedores (CNPJ, Razão Social, Optante do Simples) da planilha manual do
-    usuário — no arquivo "ICMS INTERNO" essa aba se chama "Plan1", com um cabeçalho de verdade a partir da
-    linha "CNPJ | RAZÃO SOCIAL | SIMPLES" (as primeiras linhas da aba costumam vir em branco). Um mesmo
-    CNPJ pode aparecer mais de uma vez (linhas duplicadas/atualizadas na planilha do usuário) — fica só a
-    última ocorrência."""
-    df = pd.read_excel(arquivo, sheet_name=sheet_name, header=None, engine="calamine")
-    idx_cabecalho = None
+def _achar_cabecalho_cadastro(df: pd.DataFrame):
+    """Procura, dentro de um DataFrame já lido (sem header), a linha "CNPJ | RAZÃO SOCIAL | SIMPLES" — as
+    primeiras linhas da aba costumam vir em branco/com título, então não dá pra assumir uma posição fixa.
+    Devolve o índice da linha, ou None se não achar nesta aba."""
     for i in range(len(df)):
         linha = df.iloc[i].astype(str).str.strip().str.upper().tolist()
         if "CNPJ" in linha and "RAZÃO SOCIAL" in linha:
-            idx_cabecalho = i
+            return i
+    return None
+
+
+def parse_cadastro_fornecedores_st(arquivo, sheet_name=None) -> pd.DataFrame:
+    """Lê o cadastro de fornecedores (CNPJ, Razão Social, Optante do Simples) de uma planilha — pode ser a
+    aba "Plan1" da planilha manual "ICMS INTERNO" do usuário, ou um arquivo dedicado só com esse cadastro
+    (achado em 11/08/2026: o usuário também manda um arquivo "Simples.xlsx" com a mesma estrutura, mas com
+    a aba chamada "Planilha1" em vez de "Plan1" — por isso `sheet_name=None` por padrão: procura o
+    cabeçalho "CNPJ | RAZÃO SOCIAL | SIMPLES" em TODAS as abas do arquivo, em vez de exigir um nome fixo).
+    Um mesmo CNPJ pode aparecer mais de uma vez (linhas duplicadas/atualizadas na planilha do usuário) —
+    fica só a última ocorrência."""
+    if sheet_name is not None:
+        candidatos = {sheet_name: pd.read_excel(arquivo, sheet_name=sheet_name, header=None, engine="calamine")}
+    else:
+        candidatos = pd.read_excel(arquivo, sheet_name=None, header=None, engine="calamine")
+
+    aba_achada = None
+    idx_cabecalho = None
+    for nome_aba, df in candidatos.items():
+        idx = _achar_cabecalho_cadastro(df)
+        if idx is not None:
+            aba_achada, idx_cabecalho = nome_aba, idx
             break
-    if idx_cabecalho is None:
+    if aba_achada is None:
         raise ValueError(
-            f"Não encontrei o cabeçalho \"CNPJ | RAZÃO SOCIAL | SIMPLES\" na aba \"{sheet_name}\" deste "
-            f"arquivo — confira se é a planilha certa (cadastro de fornecedores, com Optante do Simples)."
+            f"Não encontrei o cabeçalho \"CNPJ | RAZÃO SOCIAL | SIMPLES\" em nenhuma aba deste arquivo "
+            f"(abas conferidas: {list(candidatos.keys())}) — confira se é a planilha certa (cadastro de "
+            f"fornecedores, com Optante do Simples)."
         )
+    df = candidatos[aba_achada]
+
     cabecalho = df.iloc[idx_cabecalho].astype(str).str.strip().str.upper().tolist()
     dados = df.iloc[idx_cabecalho + 1:].copy()
     dados.columns = cabecalho
