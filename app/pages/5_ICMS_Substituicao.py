@@ -275,30 +275,80 @@ with aba_interno:
     if interno.empty:
         st.info("Nenhuma NF de fornecedor do Ceará na Rotina 1076 importada para esta competência.")
     else:
-        st.metric("Total de ICMS ST (Interno)", formatar_moeda(interno["valor_icms_st"].sum()))
+        # pedido do usuário em 11/08/2026: "colocar uma observação de situação, para informar se alguma
+        # nota é de outra competência, se for ela não entrara no calculo" — mesmo mecanismo já usado na
+        # aba Interestadual, reaproveitando a mesma tabela `icms_st_justificativas` (chave competencia_id +
+        # nf_numero, já genérica — não é exclusiva da aba Interestadual). Sem coluna de Justificativa aqui:
+        # não existe "Divergente"/"Pendente de entrada" na aba Interno (o valor já vem certo direto da
+        # 1076), então só faz sentido Observação livre + o checkbox de exclusão.
+        justificativas_int = carregar_justificativas(session, cid)
+        interno = interno.merge(
+            justificativas_int[["nf_numero", "observacao", "nao_entra_calculo"]], on="nf_numero", how="left"
+        )
+        interno["nao_entra_calculo"] = interno["nao_entra_calculo"].fillna(False).astype(bool)
+        interno["observacao"] = interno["observacao"].apply(lambda v: v if pd.notna(v) else None)
 
-        tabela_int = interno.copy()
-        if tabela_int["aliq_st_uniforme"].eq(False).any():
+        total_considerado = interno.loc[~interno["nao_entra_calculo"], "valor_icms_st"].sum()
+        total_excluido = interno.loc[interno["nao_entra_calculo"], "valor_icms_st"].sum()
+        n_excluidas_int = int(interno["nao_entra_calculo"].sum())
+
+        mi1, mi2 = st.columns(2)
+        mi1.metric("Total de ICMS ST (Interno)", formatar_moeda(total_considerado))
+        mi2.metric("🚫 Excluído do cálculo", f"{formatar_moeda(total_excluido)} ({n_excluidas_int} NF)")
+
+        if interno["aliq_st_uniforme"].eq(False).any():
             st.warning(
                 "Alguma NF tem itens com alíquotas diferentes entre si — a coluna Alíquota mostra a média "
                 "nesses casos (marcado com ⚠️), não uma alíquota única real. O valor de ICMS ST somado "
                 "continua correto (é a soma direta dos itens, não depende da média)."
             )
+
+        tabela_int = interno.copy()
         tabela_int["Alíquota"] = tabela_int.apply(
             lambda r: f"{r['aliq_st']:.2f}%" + ("" if r["aliq_st_uniforme"] else " ⚠️"), axis=1
         )
-        tabela_int["base_st_final"] = tabela_int["base_st_final"].apply(_fmt)
-        tabela_int["valor_icms_st"] = tabela_int["valor_icms_st"].apply(_fmt)
+        tabela_int["base_st_final_fmt"] = tabela_int["base_st_final"].apply(_fmt)
+        tabela_int["valor_icms_st_fmt"] = tabela_int["valor_icms_st"].apply(_fmt)
         tabela_int["simples"] = tabela_int["simples"].fillna("—")
         tabela_int["fornecedor_nome"] = tabela_int["fornecedor_nome"].fillna(
             "— (só disponível no layout resumido por NF da Rotina 1076)"
         )
-        tabela_int = tabela_int.rename(columns={
-            "nf_numero": "NF", "fornecedor_nome": "Fornecedor", "fornecedor_cnpj": "CNPJ",
-            "dt_entrada": "Data Entrada", "base_st_final": "Base ST", "valor_icms_st": "ICMS ST",
-            "simples": "Optante Simples",
-        })[["NF", "Fornecedor", "CNPJ", "Data Entrada", "Base ST", "Alíquota", "ICMS ST", "Optante Simples"]]
-        st.dataframe(tabela_int, use_container_width=True, hide_index=True, height=500)
+
+        tabela_int_editada = st.data_editor(
+            tabela_int,
+            use_container_width=True, hide_index=True, height=500, key="editor_situacao_interno",
+            column_config={
+                "nf_numero": st.column_config.TextColumn("NF", disabled=True),
+                "fornecedor_nome": st.column_config.TextColumn("Fornecedor", disabled=True),
+                "fornecedor_cnpj": st.column_config.TextColumn("CNPJ", disabled=True),
+                "dt_entrada": st.column_config.DateColumn("Data Entrada", disabled=True),
+                "base_st_final_fmt": st.column_config.TextColumn("Base ST", disabled=True),
+                "Alíquota": st.column_config.TextColumn("Alíquota", disabled=True),
+                "valor_icms_st_fmt": st.column_config.TextColumn("ICMS ST", disabled=True),
+                "simples": st.column_config.TextColumn("Optante Simples", disabled=True),
+                "observacao": st.column_config.TextColumn("Observação (texto livre)", width="large"),
+                "nao_entra_calculo": st.column_config.CheckboxColumn(
+                    "Excluída do cálculo?",
+                    help=(
+                        "Marque quando a nota é de outra competência e não deve entrar no total de ICMS "
+                        "ST Interno."
+                    ),
+                ),
+            },
+            column_order=[
+                "nf_numero", "fornecedor_nome", "fornecedor_cnpj", "dt_entrada", "base_st_final_fmt",
+                "Alíquota", "valor_icms_st_fmt", "simples", "observacao", "nao_entra_calculo",
+            ],
+        )
+
+        if st.button("💾 Salvar situações (Interno)", key="btn_salvar_situacao_interno"):
+            n = salvar_justificativas(
+                session, cid,
+                tabela_int_editada[["nf_numero", "observacao", "nao_entra_calculo"]],
+                usuario_email=usuario_atual()["email"],
+            )
+            st.success(f"{n} situação(ões) salva(s).")
+            st.rerun()
 
 with st.expander("Ver itens importados (detalhe, sem agregação por NF)"):
     aba_1076, aba_sefaz = st.tabs(["Rotina 1076 (itens)", "Lançamentos da SEFAZ"])
