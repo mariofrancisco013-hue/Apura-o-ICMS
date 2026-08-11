@@ -47,6 +47,11 @@ from sqlalchemy import text
 
 TOLERANCIA = 0.05  # mesma tolerância usada na Conferência Detalhada (app/lib/conferencia_detalhada_1024.py)
 
+# Pedido do usuário em 11/08/2026: renomear o status "Não cobrado pela SEFAZ" -> "Não localizado na Sefaz"
+# (mesmo significado, nome mais claro pro analista). Definido aqui no topo porque é usado tanto por
+# comparar_1076_sefaz quanto pela lista de justificativas (ver mais abaixo).
+STATUS_NAO_LOCALIZADO = "Não localizado na Sefaz"
+
 # Colunas posicionais do export ITEM A ITEM da Rotina 1076 (sheet "Report", sem cabeçalho, 18 colunas).
 COLS_1076_ITEM_RAW = [
     "dt_entrada", "dt_emissao", "dt_selo", "num_seq_ent", "nf_numero", "produto_codigo",
@@ -369,7 +374,7 @@ def comparar_1076_sefaz(session, competencia_id: int, receita_filtro: str = "103
         if tem_sefaz and not tem_sistema:
             return "Pendente de entrada"
         if not tem_sefaz and tem_sistema:
-            return "Não cobrado pela SEFAZ"
+            return STATUS_NAO_LOCALIZADO
         if abs(row["diferenca"]) > TOLERANCIA:
             return "Divergente"
         return "OK"
@@ -378,10 +383,86 @@ def comparar_1076_sefaz(session, competencia_id: int, receita_filtro: str = "103
     comp = comp.sort_values(
         by=["status", "nf_numero"],
         key=lambda s: s if s.name != "status" else s.map(
-            {"Pendente de entrada": 0, "Divergente": 1, "Não cobrado pela SEFAZ": 2, "OK": 3}
+            {"Pendente de entrada": 0, "Divergente": 1, STATUS_NAO_LOCALIZADO: 2, "OK": 3}
         ),
     ).reset_index(drop=True)
     return comp[["nf_numero", "sefaz_calculado", "sistema_valor_icms_st", "diferenca", "status"]]
+
+
+# ==============================================================================================
+# Justificativa das divergências (aba Interestadual) — pedido do usuário em 11/08/2026: "inclua uma coluna
+# justificativa, para as divergências onde o analista deve informar do que se trata a divergência
+# [...] Além disso, ao lado deve ter um campo observação que permita a digitação de texto livre. Nas que
+# estão como Não cobrados pela Sefaz, mude o nome para Não localizado na Sefaz e na justificativa nota não
+# selada ou Outra competência."
+#
+# Cada status tem seu próprio conjunto de opções de justificativa (não faz sentido, por exemplo, "Sefaz
+# errou no cálculo" pra uma NF que a Sefaz nem cobrou) — por isso duas listas separadas, cada uma usada
+# numa grade de edição própria na tela (ver app/pages/5_ICMS_Substituicao.py).
+# ==============================================================================================
+
+JUSTIFICATIVAS_DIVERGENTE = [
+    "Tributação corrigida no Sistema",
+    "Solicitação de correção Sefaz",
+    "Sefaz errou no cálculo (A Menor)",
+    "Sistema não calculou",
+    "Outra Competência",
+]
+
+JUSTIFICATIVAS_NAO_LOCALIZADO = [
+    "Nota não selada",
+    "Outra competência",
+]
+
+COLS_JUSTIFICATIVAS = ["nf_numero", "justificativa", "observacao", "nao_entra_calculo"]
+
+
+def carregar_justificativas(session, competencia_id: int) -> pd.DataFrame:
+    rows = session.execute(text("""
+        select nf_numero, justificativa, observacao, nao_entra_calculo
+        from icms_st_justificativas where competencia_id = :cid order by nf_numero
+    """), {"cid": competencia_id}).mappings().all()
+    df = pd.DataFrame(rows, columns=COLS_JUSTIFICATIVAS)
+    df["nao_entra_calculo"] = df["nao_entra_calculo"].fillna(False).astype(bool)
+    return df
+
+
+def salvar_justificativas(session, competencia_id: int, df: pd.DataFrame, usuario_email: str = None) -> int:
+    """Upsert por (competencia_id, nf_numero) — `df` só precisa ter as NFs que o analista editou nesta
+    tela (não precisa ser a lista inteira; NFs de fora do `df` não são tocadas). Linha totalmente "vazia"
+    (sem justificativa, sem observação, e nao_entra_calculo desmarcado) é APAGADA em vez de gravada — tanto
+    pra não acumular lixo no banco quanto pra permitir desmarcar "não entra no cálculo" de volta (senão a
+    marcação antiga ficaria presa: um simples "pular" não distingue "nunca marcado" de "desmarcado agora").
+    `nao_entra_calculo` (pedido do usuário em 11/08/2026, "colocar uma observação de situação, para
+    informar se alguma nota é de outra competência E ela não deve ir para o cálculo"): quando True, a NF
+    sai da contagem de Pendente/Divergente/Não localizado nos totais da tela (ver
+    app/pages/5_ICMS_Substituicao.py) — cobre qualquer status, não só divergência."""
+    n = 0
+    for _, row in df.iterrows():
+        justificativa = (row.get("justificativa") or "").strip() or None
+        observacao = (row.get("observacao") or "").strip() or None
+        nao_entra_calculo = bool(row.get("nao_entra_calculo") or False)
+        if not justificativa and not observacao and not nao_entra_calculo:
+            session.execute(text("""
+                delete from icms_st_justificativas where competencia_id = :cid and nf_numero = :nf
+            """), {"cid": competencia_id, "nf": row["nf_numero"]})
+            continue
+        session.execute(text("""
+            insert into icms_st_justificativas
+                (competencia_id, nf_numero, justificativa, observacao, nao_entra_calculo,
+                 atualizado_por_email, atualizado_em)
+            values (:cid, :nf, :just, :obs, :nao_entra, :email, now())
+            on conflict (competencia_id, nf_numero) do update set
+                justificativa = excluded.justificativa, observacao = excluded.observacao,
+                nao_entra_calculo = excluded.nao_entra_calculo,
+                atualizado_por_email = excluded.atualizado_por_email, atualizado_em = now()
+        """), {
+            "cid": competencia_id, "nf": row["nf_numero"], "just": justificativa, "obs": observacao,
+            "nao_entra": nao_entra_calculo, "email": usuario_email,
+        })
+        n += 1
+    session.commit()
+    return n
 
 
 # ==============================================================================================
