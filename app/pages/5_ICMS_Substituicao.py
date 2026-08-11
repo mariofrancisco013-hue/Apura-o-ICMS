@@ -10,7 +10,7 @@ from lib.icms_st import (
     parse_rotina_1076, parse_sefaz_lancamentos, salvar_rotina_1076, salvar_sefaz_lancamentos,
     carregar_rotina_1076, carregar_sefaz_lancamentos, comparar_1076_sefaz, listar_1076_interno,
     parse_cadastro_fornecedores_st, salvar_cadastro_fornecedores_st, listar_cadastro_fornecedores_st,
-    STATUS_NAO_LOCALIZADO, JUSTIFICATIVAS_DIVERGENTE, JUSTIFICATIVAS_NAO_LOCALIZADO,
+    STATUS_NAO_LOCALIZADO, JUSTIFICATIVAS_TODAS,
     carregar_justificativas, salvar_justificativas,
 )
 from lib.formatacao import formatar_moeda, rotulo_empresa
@@ -196,26 +196,50 @@ with aba_interestadual:
         )
         comp_exibir = comp[comp["status"].isin(status_filtro)] if status_filtro else comp
 
+        # pedido do usuário em 11/08/2026: "a justificativa e observação e excluída coloque para que
+        # selecione diretamente aqui" — Justificativa, Observação e Excluída do cálculo agora se editam
+        # direto nesta mesma tabela (antes ficavam em três grades de edição separadas, uma por status,
+        # abaixo dela). As colunas monetárias/Situação ficam desabilitadas (só leitura); NF é o identificador
+        # (não editável). "*_fmt" são colunas auxiliares só de exibição (moeda formatada) — as colunas
+        # numéricas cruas (sefaz_calculado, sistema_valor_icms_st, diferenca) ficam fora de column_order e
+        # por isso não aparecem no grid.
         tabela = comp_exibir.copy()
-        tabela["sefaz_calculado"] = tabela["sefaz_calculado"].apply(_fmt)
-        tabela["sistema_valor_icms_st"] = tabela["sistema_valor_icms_st"].apply(_fmt)
-        tabela["diferenca"] = tabela["diferenca"].apply(_fmt)
-        tabela["justificativa"] = tabela["justificativa"].fillna("—")
-        tabela["observacao"] = tabela["observacao"].fillna("—")
-        tabela["nao_entra_calculo"] = tabela["nao_entra_calculo"].map(
-            {True: "🚫 Excluída (outra competência)", False: ""}
+        tabela["sefaz_calculado_fmt"] = tabela["sefaz_calculado"].apply(_fmt)
+        tabela["sistema_valor_icms_st_fmt"] = tabela["sistema_valor_icms_st"].apply(_fmt)
+        tabela["diferenca_fmt"] = tabela["diferenca"].apply(_fmt)
+        tabela["justificativa"] = tabela["justificativa"].apply(lambda v: v if pd.notna(v) else None)
+        tabela["observacao"] = tabela["observacao"].apply(lambda v: v if pd.notna(v) else None)
+
+        tabela_editada = st.data_editor(
+            tabela,
+            use_container_width=True, hide_index=True, height=500, key="editor_comparacao_interestadual",
+            column_config={
+                "nf_numero": st.column_config.TextColumn("NF", disabled=True),
+                "sefaz_calculado_fmt": st.column_config.TextColumn("SEFAZ (Calculado)", disabled=True),
+                "sistema_valor_icms_st_fmt": st.column_config.TextColumn(
+                    "Sistema (Rotina 1076)", disabled=True
+                ),
+                "diferenca_fmt": st.column_config.TextColumn("Diferença (SEFAZ − Sistema)", disabled=True),
+                "status": st.column_config.TextColumn("Situação", disabled=True),
+                # Justificativa unificada — pedido do usuário em 11/08/2026: "a justificativa de nota não
+                # selada ou outra competencia deve estar nessa aba como uma opção nessa coluna". O
+                # SelectboxColumn não permite opções condicionais por linha, então esta coluna única usa
+                # JUSTIFICATIVAS_TODAS (união dos motivos de Divergência + de "Não localizado na Sefaz").
+                "justificativa": st.column_config.SelectboxColumn("Justificativa", options=JUSTIFICATIVAS_TODAS),
+                "observacao": st.column_config.TextColumn("Observação (texto livre)", width="large"),
+                "nao_entra_calculo": st.column_config.CheckboxColumn(
+                    "Excluída do cálculo?",
+                    help=(
+                        "Marque quando a nota é de outra competência e não deve contar como pendência/"
+                        "divergência deste mês."
+                    ),
+                ),
+            },
+            column_order=[
+                "nf_numero", "sefaz_calculado_fmt", "sistema_valor_icms_st_fmt", "diferenca_fmt", "status",
+                "justificativa", "observacao", "nao_entra_calculo",
+            ],
         )
-        tabela = tabela.rename(columns={
-            "nf_numero": "NF",
-            "sefaz_calculado": "SEFAZ (Calculado)",
-            "sistema_valor_icms_st": "Sistema (Rotina 1076)",
-            "diferenca": "Diferença (SEFAZ − Sistema)",
-            "status": "Situação",
-            "justificativa": "Justificativa",
-            "observacao": "Observação",
-            "nao_entra_calculo": "Excluída do cálculo?",
-        })
-        st.dataframe(tabela, use_container_width=True, hide_index=True, height=500)
 
         st.caption(
             "**Pendente de entrada** — a SEFAZ está cobrando, mas a NF ainda não aparece na Rotina 1076: "
@@ -223,116 +247,19 @@ with aba_interestadual:
             "(diferença acima de R$ 0,05). **OK** — bate. **" + STATUS_NAO_LOCALIZADO + "** — aparece na "
             "Rotina 1076 mas sem cobrança nesta Receita (pode ser de outra receita, ou lançamento da SEFAZ "
             "ainda não disponibilizado no portal). **Excluída do cálculo** — marcada pelo analista como não "
-            "pertencente a esta competência (ver seções de edição abaixo); some das contagens de Pendente/"
-            "Divergente/Não localizado acima, mas continua aparecendo na tabela pra rastreabilidade."
+            "pertencente a esta competência; some das contagens de Pendente/Divergente/Não localizado nas "
+            "métricas acima, mas continua aparecendo na tabela pra rastreabilidade. Edite Justificativa, "
+            "Observação e Excluída do cálculo direto na tabela acima e clique em Salvar."
         )
 
-        # ----------------------------------------------------------------------------------
-        # Justificativa das divergências — pedido do usuário em 11/08/2026: cada status divergente tem seu
-        # próprio conjunto de motivos possíveis (não faz sentido "Sefaz errou no cálculo" pra uma NF que a
-        # Sefaz nem cobrou), por isso grades de edição separadas, uma por status. A coluna "Não entra no
-        # cálculo" (checkbox) é a mesma nas três — pedido do usuário em 11/08/2026: "colocar uma observação
-        # de situação, para informar se alguma nota é de outra competência E ela não deve ir para o
-        # cálculo" — quando marcada, a NF some das contagens de Pendente/Divergente/Não localizado acima.
-        _COLCFG_NAO_ENTRA = st.column_config.CheckboxColumn(
-            "Não entra no cálculo (outra competência)",
-            help="Marque quando a nota é de outra competência e não deve contar como pendência/divergência deste mês.",
-        )
-
-        st.markdown("#### 📝 Justificar divergências")
-
-        divergentes = comp[comp["status"] == "Divergente"][
-            ["nf_numero", "sefaz_calculado", "sistema_valor_icms_st", "diferenca", "justificativa",
-             "observacao", "nao_entra_calculo"]
-        ].copy()
-        if divergentes.empty:
-            st.caption("Nenhuma NF Divergente nesta competência.")
-        else:
-            for col in ("sefaz_calculado", "sistema_valor_icms_st", "diferenca"):
-                divergentes[col] = divergentes[col].apply(_fmt)
-            divergentes_editado = st.data_editor(
-                divergentes, use_container_width=True, hide_index=True, key="editor_justificativa_divergente",
-                column_config={
-                    "nf_numero": st.column_config.TextColumn("NF", disabled=True),
-                    "sefaz_calculado": st.column_config.TextColumn("SEFAZ (Calculado)", disabled=True),
-                    "sistema_valor_icms_st": st.column_config.TextColumn("Sistema (Rotina 1076)", disabled=True),
-                    "diferenca": st.column_config.TextColumn("Diferença", disabled=True),
-                    "justificativa": st.column_config.SelectboxColumn(
-                        "Justificativa", options=JUSTIFICATIVAS_DIVERGENTE
-                    ),
-                    "observacao": st.column_config.TextColumn("Observação (texto livre)", width="large"),
-                    "nao_entra_calculo": _COLCFG_NAO_ENTRA,
-                },
-                column_order=[
-                    "nf_numero", "sefaz_calculado", "sistema_valor_icms_st", "diferenca", "justificativa",
-                    "observacao", "nao_entra_calculo",
-                ],
+        if st.button("💾 Salvar justificativas e situações", key="btn_salvar_justificativas_unificado"):
+            n = salvar_justificativas(
+                session, cid,
+                tabela_editada[["nf_numero", "justificativa", "observacao", "nao_entra_calculo"]],
+                usuario_email=usuario_atual()["email"],
             )
-            if st.button("💾 Salvar justificativas (Divergentes)", key="btn_salvar_justificativa_divergente"):
-                n = salvar_justificativas(session, cid, divergentes_editado, usuario_email=usuario_atual()["email"])
-                st.success(f"{n} justificativa(s) salva(s).")
-                st.rerun()
-
-        st.markdown(f"#### 📝 Justificar \"{STATUS_NAO_LOCALIZADO}\"")
-
-        nao_localizadas = comp[comp["status"] == STATUS_NAO_LOCALIZADO][
-            ["nf_numero", "sistema_valor_icms_st", "justificativa", "observacao", "nao_entra_calculo"]
-        ].copy()
-        if nao_localizadas.empty:
-            st.caption(f"Nenhuma NF \"{STATUS_NAO_LOCALIZADO}\" nesta competência.")
-        else:
-            nao_localizadas["sistema_valor_icms_st"] = nao_localizadas["sistema_valor_icms_st"].apply(_fmt)
-            nao_localizadas_editado = st.data_editor(
-                nao_localizadas, use_container_width=True, hide_index=True,
-                key="editor_justificativa_nao_localizado",
-                column_config={
-                    "nf_numero": st.column_config.TextColumn("NF", disabled=True),
-                    "sistema_valor_icms_st": st.column_config.TextColumn("Sistema (Rotina 1076)", disabled=True),
-                    "justificativa": st.column_config.SelectboxColumn(
-                        "Justificativa", options=JUSTIFICATIVAS_NAO_LOCALIZADO
-                    ),
-                    "observacao": st.column_config.TextColumn("Observação (texto livre)", width="large"),
-                    "nao_entra_calculo": _COLCFG_NAO_ENTRA,
-                },
-                column_order=[
-                    "nf_numero", "sistema_valor_icms_st", "justificativa", "observacao", "nao_entra_calculo",
-                ],
-            )
-            if st.button("💾 Salvar justificativas (" + STATUS_NAO_LOCALIZADO + ")",
-                         key="btn_salvar_justificativa_nao_localizado"):
-                n = salvar_justificativas(
-                    session, cid, nao_localizadas_editado, usuario_email=usuario_atual()["email"]
-                )
-                st.success(f"{n} justificativa(s) salva(s).")
-                st.rerun()
-
-        st.markdown("#### 📝 Marcar \"Pendente de entrada\" de outra competência")
-        st.caption(
-            "Sem lista de justificativa aqui (não é uma divergência propriamente dita) — só o campo "
-            "Observação e o \"Não entra no cálculo\", pra quando a NF pendente na verdade é de outro mês."
-        )
-
-        pendentes = comp[comp["status"] == "Pendente de entrada"][
-            ["nf_numero", "sefaz_calculado", "observacao", "nao_entra_calculo"]
-        ].copy()
-        if pendentes.empty:
-            st.caption("Nenhuma NF \"Pendente de entrada\" nesta competência.")
-        else:
-            pendentes["sefaz_calculado"] = pendentes["sefaz_calculado"].apply(_fmt)
-            pendentes_editado = st.data_editor(
-                pendentes, use_container_width=True, hide_index=True, key="editor_situacao_pendente",
-                column_config={
-                    "nf_numero": st.column_config.TextColumn("NF", disabled=True),
-                    "sefaz_calculado": st.column_config.TextColumn("SEFAZ (Calculado)", disabled=True),
-                    "observacao": st.column_config.TextColumn("Observação (texto livre)", width="large"),
-                    "nao_entra_calculo": _COLCFG_NAO_ENTRA,
-                },
-                column_order=["nf_numero", "sefaz_calculado", "observacao", "nao_entra_calculo"],
-            )
-            if st.button("💾 Salvar situação (Pendentes de entrada)", key="btn_salvar_situacao_pendente"):
-                n = salvar_justificativas(session, cid, pendentes_editado, usuario_email=usuario_atual()["email"])
-                st.success(f"{n} situação(ões) salva(s).")
-                st.rerun()
+            st.success(f"{n} linha(s) salva(s).")
+            st.rerun()
 
 # ============================================================================================
 with aba_interno:

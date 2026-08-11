@@ -396,9 +396,14 @@ def comparar_1076_sefaz(session, competencia_id: int, receita_filtro: str = "103
 # estão como Não cobrados pela Sefaz, mude o nome para Não localizado na Sefaz e na justificativa nota não
 # selada ou Outra competência."
 #
-# Cada status tem seu próprio conjunto de opções de justificativa (não faz sentido, por exemplo, "Sefaz
-# errou no cálculo" pra uma NF que a Sefaz nem cobrou) — por isso duas listas separadas, cada uma usada
-# numa grade de edição própria na tela (ver app/pages/5_ICMS_Substituicao.py).
+# Cada status tinha, a princípio, seu próprio conjunto de opções de justificativa (não faz sentido, por
+# exemplo, "Sefaz errou no cálculo" pra uma NF que a Sefaz nem cobrou) — por isso duas listas separadas,
+# JUSTIFICATIVAS_DIVERGENTE e JUSTIFICATIVAS_NAO_LOCALIZADO. O usuário pediu, ainda em 11/08/2026, pra editar
+# tudo direto numa única coluna na tabela principal da aba ("a justificativa e observação e excluída coloque
+# para que selecione diretamente aqui" + "a justificativa de nota não selada ou outra competencia deve estar
+# nessa aba como uma opção nessa coluna") — como o Streamlit não permite opções condicionais por linha numa
+# mesma coluna (SelectboxColumn.options vale pra coluna inteira), a tela usa JUSTIFICATIVAS_TODAS (união das
+# duas listas) como opções da coluna única de Justificativa.
 # ==============================================================================================
 
 JUSTIFICATIVAS_DIVERGENTE = [
@@ -413,6 +418,8 @@ JUSTIFICATIVAS_NAO_LOCALIZADO = [
     "Nota não selada",
     "Outra competência",
 ]
+
+JUSTIFICATIVAS_TODAS = list(dict.fromkeys(JUSTIFICATIVAS_DIVERGENTE + JUSTIFICATIVAS_NAO_LOCALIZADO))
 
 COLS_JUSTIFICATIVAS = ["nf_numero", "justificativa", "observacao", "nao_entra_calculo"]
 
