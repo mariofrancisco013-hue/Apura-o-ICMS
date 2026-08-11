@@ -27,6 +27,18 @@ comparar).
 
 Persistência: confirmado com o usuário ("Salvar por competência (Recomendado)") que esta conferência fica
 salva por competência, igual os checkpoints da Rotina 1024/1025 — ver sql/015_icms_st_interestadual.sql.
+
+DOIS LAYOUTS da Rotina 1076 (achado em 11/08/2026, arquivo real do usuário "Relatorio 1076 Atacadão
+F3.xls"): o Winthor exporta esse relatório tanto item a item (18 colunas, com produto/NCM — o layout
+original suportado) quanto já RESUMIDO por Nota Fiscal (17 colunas, sem produto/NCM mas com fornecedor e
+CNPJ do fornecedor). Confirmado que é a mesma fonte de dado: as NFs do arquivo resumido bateram exatas, ao
+centavo, contra o total por NF calculado agregando o arquivo item a item já importado da mesma competência.
+`parse_rotina_1076` detecta automaticamente qual dos dois é pelo número de colunas e usa o parser certo —
+os dois gravam na mesma tabela (rotina_1076_itens), só que o resumido deixa nulas as colunas que só
+existem no item a item (produto_codigo, produto_descricao, ncm, num_seq_ent) e vice-versa (fornecedor_*
+só existe no resumido) — `formato_origem` registra qual layout gerou cada linha. A comparação por NF
+(comparar_1076_sefaz) funciona igual com qualquer um dos dois, porque soma valor_icms_st por NF, e esse
+valor é confiável nos dois layouts.
 """
 import re
 
@@ -35,16 +47,30 @@ from sqlalchemy import text
 
 TOLERANCIA = 0.05  # mesma tolerância usada na Conferência Detalhada (app/lib/conferencia_detalhada_1024.py)
 
-# Colunas posicionais do export da Rotina 1076 (sheet "Report", sem cabeçalho) — ver docstring do módulo.
-COLS_1076_RAW = [
+# Colunas posicionais do export ITEM A ITEM da Rotina 1076 (sheet "Report", sem cabeçalho, 18 colunas).
+COLS_1076_ITEM_RAW = [
     "dt_entrada", "dt_emissao", "dt_selo", "num_seq_ent", "nf_numero", "produto_codigo",
     "produto_descricao", "ncm", "uf", "_col9", "valor_produto", "icms_proprio", "base_st",
     "col13", "aliq_st", "aliq_cheia", "base_st_final", "valor_icms_st",
 ]
+
+# Colunas posicionais do export RESUMIDO POR NF da Rotina 1076 (mesma sheet "Report", sem cabeçalho, mas
+# 17 colunas — sem produto/NCM/sequência de item, com fornecedor e CNPJ do fornecedor no lugar). Colunas
+# c7 ("ajuste" — não bate em todas as linhas testadas), c11, c13 e c16 têm semântica não confirmada e
+# baixo valor informativo (quase sempre 0) — não são gravadas, mesmo tratamento dado à coluna 9 do layout
+# item a item.
+COLS_1076_RESUMIDO_RAW = [
+    "dt_entrada", "dt_emissao", "dt_selo", "nf_numero", "fornecedor", "fornecedor_cnpj", "uf",
+    "_col7", "valor_produto", "icms_proprio", "base_st", "_col11", "aliq_st", "_col13",
+    "base_st_final", "valor_icms_st", "_col16",
+]
+
+# Colunas finais da tabela rotina_1076_itens (sem competencia_id/id/importado_em, que ficam de fora daqui).
 COLS_1076_TABELA = [
     "dt_entrada", "dt_emissao", "dt_selo", "num_seq_ent", "nf_numero", "produto_codigo",
     "produto_descricao", "ncm", "uf", "valor_produto", "icms_proprio", "base_st", "col13",
-    "aliq_st", "aliq_cheia", "base_st_final", "valor_icms_st",
+    "aliq_st", "aliq_cheia", "base_st_final", "valor_icms_st", "formato_origem",
+    "fornecedor_codigo", "fornecedor_nome", "fornecedor_cnpj",
 ]
 
 # Colunas do CSV de lançamentos da SEFAZ (cabeçalho real, separador ";", campos entre aspas) -> nome interno.
@@ -94,6 +120,19 @@ def _limpar_celula_corrompida(valor):
     return None
 
 
+def _dividir_codigo_nome(valor):
+    """Separa a célula "Fornecedor" do layout resumido da Rotina 1076 ("<código> - <nome>", ex: "254 - IBEL
+    IND DE BORRACHA E.V.A. LTDA") em (codigo, nome) — mesmo formato/mesma lógica já usada para a célula
+    "Produto" do Entrada/Saída (ver _dividir_codigo_descricao em app/lib/importacao.py)."""
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return None, None
+    texto = str(valor).strip()
+    if " - " in texto:
+        codigo, nome = texto.split(" - ", 1)
+        return codigo.strip(), nome.strip()
+    return None, texto or None
+
+
 def _moeda_br_para_float(valor) -> float:
     """Converte string de moeda do export da SEFAZ (ex: "R$ 16.041,00", com espaço normal ou não-quebrável
     entre "R$" e o número) para float. Célula vazia/inválida vira 0.0 — mais seguro que travar a importação
@@ -111,20 +150,10 @@ def _moeda_br_para_float(valor) -> float:
         return 0.0
 
 
-def parse_rotina_1076(arquivo) -> pd.DataFrame:
-    """Lê o export da Rotina 1076 do Winthor (.xls/.xlsx, sheet "Report", sem linha de cabeçalho, 18
-    colunas posicionais) e devolve um DataFrame já no formato da tabela rotina_1076_itens (sem
-    competencia_id, que é acrescentado por salvar_rotina_1076). Uma linha por item de entrada — a mesma NF
-    aparece várias vezes, uma por item; a agregação por NF acontece em comparar_1076_sefaz."""
-    # engine="calamine": mesmo motivo do resto do projeto (ver app/lib/importacao.py) — mais tolerante a XML
-    # fora do padrão que o Winthor às vezes gera em exports .xlsx.
-    df = pd.read_excel(arquivo, sheet_name="Report", header=None, engine="calamine")
-    if len(df.columns) != len(COLS_1076_RAW):
-        raise ValueError(
-            f"Arquivo da Rotina 1076 tem {len(df.columns)} colunas, esperado {len(COLS_1076_RAW)}. O "
-            f"layout do export pode ter mudado — confira antes de importar."
-        )
-    df.columns = COLS_1076_RAW
+def _parse_1076_item(df: pd.DataFrame) -> pd.DataFrame:
+    """Layout item a item (18 colunas) — uma linha por item de entrada, a mesma NF aparece várias vezes."""
+    df = df.copy()
+    df.columns = COLS_1076_ITEM_RAW
 
     df["num_seq_ent"] = df["num_seq_ent"].apply(_limpar_celula_corrompida)
     df["aliq_cheia"] = df["aliq_cheia"].apply(_limpar_celula_corrompida)
@@ -146,7 +175,65 @@ def parse_rotina_1076(arquivo) -> pd.DataFrame:
     out["aliq_cheia"] = df["aliq_cheia"].astype(str)
     out["base_st_final"] = pd.to_numeric(df["base_st_final"], errors="coerce").fillna(0).astype(float)
     out["valor_icms_st"] = pd.to_numeric(df["valor_icms_st"], errors="coerce").fillna(0).astype(float)
+    out["formato_origem"] = "item"
+    out["fornecedor_codigo"] = None
+    out["fornecedor_nome"] = None
+    out["fornecedor_cnpj"] = None
     return out[COLS_1076_TABELA]
+
+
+def _parse_1076_resumido(df: pd.DataFrame) -> pd.DataFrame:
+    """Layout resumido por NF (17 colunas) — uma linha por Nota Fiscal, sem detalhe de item/produto/NCM."""
+    df = df.copy()
+    df.columns = COLS_1076_RESUMIDO_RAW
+
+    fornecedor_split = df["fornecedor"].apply(_dividir_codigo_nome)
+
+    out = pd.DataFrame({"nf_numero": df["nf_numero"].astype(str).str.strip()})
+    out["dt_entrada"] = pd.to_datetime(df["dt_entrada"], errors="coerce").dt.date
+    out["dt_emissao"] = pd.to_datetime(df["dt_emissao"], errors="coerce").dt.date
+    out["dt_selo"] = pd.to_datetime(df["dt_selo"], errors="coerce").dt.date
+    out["num_seq_ent"] = None
+    out["produto_codigo"] = None
+    out["produto_descricao"] = None
+    out["ncm"] = None
+    out["uf"] = df["uf"]
+    out["valor_produto"] = pd.to_numeric(df["valor_produto"], errors="coerce").fillna(0).astype(float)
+    out["icms_proprio"] = pd.to_numeric(df["icms_proprio"], errors="coerce").fillna(0).astype(float)
+    out["base_st"] = pd.to_numeric(df["base_st"], errors="coerce").fillna(0).astype(float)
+    out["col13"] = None
+    out["aliq_st"] = pd.to_numeric(df["aliq_st"], errors="coerce").fillna(0).astype(float)
+    out["aliq_cheia"] = None
+    out["base_st_final"] = pd.to_numeric(df["base_st_final"], errors="coerce").fillna(0).astype(float)
+    out["valor_icms_st"] = pd.to_numeric(df["valor_icms_st"], errors="coerce").fillna(0).astype(float)
+    out["formato_origem"] = "resumido_nf"
+    out["fornecedor_codigo"] = fornecedor_split.apply(lambda par: par[0])
+    out["fornecedor_nome"] = fornecedor_split.apply(lambda par: par[1])
+    out["fornecedor_cnpj"] = df["fornecedor_cnpj"]
+    return out[COLS_1076_TABELA]
+
+
+def parse_rotina_1076(arquivo) -> pd.DataFrame:
+    """Lê o export da Rotina 1076 do Winthor (.xls/.xlsx, sheet "Report", sem linha de cabeçalho) e devolve
+    um DataFrame já no formato da tabela rotina_1076_itens (sem competencia_id, que é acrescentado por
+    salvar_rotina_1076). Detecta automaticamente qual dos dois layouts é pelo número de colunas — ver
+    docstring do módulo:
+    - 18 colunas: layout item a item (uma linha por item de entrada; a mesma NF aparece várias vezes).
+    - 17 colunas: layout resumido por NF (uma linha por Nota Fiscal; sem produto/NCM, com fornecedor).
+    A agregação por NF (soma de valor_icms_st) acontece em comparar_1076_sefaz e funciona igual com
+    qualquer um dos dois layouts."""
+    # engine="calamine": mesmo motivo do resto do projeto (ver app/lib/importacao.py) — mais tolerante a XML
+    # fora do padrão que o Winthor às vezes gera em exports .xlsx.
+    df = pd.read_excel(arquivo, sheet_name="Report", header=None, engine="calamine")
+    if len(df.columns) == len(COLS_1076_ITEM_RAW):
+        return _parse_1076_item(df)
+    if len(df.columns) == len(COLS_1076_RESUMIDO_RAW):
+        return _parse_1076_resumido(df)
+    raise ValueError(
+        f"Arquivo da Rotina 1076 tem {len(df.columns)} colunas — esperado {len(COLS_1076_ITEM_RAW)} "
+        f"(layout item a item) ou {len(COLS_1076_RESUMIDO_RAW)} (layout resumido por NF). O layout do "
+        f"export pode ter mudado — confira antes de importar."
+    )
 
 
 def parse_sefaz_lancamentos(arquivo) -> pd.DataFrame:
@@ -217,7 +304,7 @@ def carregar_rotina_1076(session, competencia_id: int) -> pd.DataFrame:
     rows = session.execute(text("""
         select dt_entrada, dt_emissao, dt_selo, num_seq_ent, nf_numero, produto_codigo, produto_descricao,
                ncm, uf, valor_produto, icms_proprio, base_st, col13, aliq_st, aliq_cheia, base_st_final,
-               valor_icms_st
+               valor_icms_st, formato_origem, fornecedor_codigo, fornecedor_nome, fornecedor_cnpj
         from rotina_1076_itens where competencia_id = :cid order by nf_numero, num_seq_ent
     """), {"cid": competencia_id}).mappings().all()
     return pd.DataFrame(rows, columns=COLS_1076_TABELA)
