@@ -527,7 +527,16 @@ def listar_1023_antecipado(session, competencia_id: int) -> pd.DataFrame:
         rotina_agg["tem_detalhe_item"] = True
 
     comp = sefaz_agg.merge(rotina_agg, on="nf_numero", how="left")
-    comp["sistema_valor_icms_st"] = comp["sistema_valor_icms_st"].fillna(0.0)
+    # pd.to_numeric antes do fillna: achado em produção (12/08/2026, erro real do usuário: "TypeError" no
+    # .sum() da tela) — quando `rotina` está vazio (nenhum Relatório 1096 importado ainda pra esta
+    # competência, mas já tem lançamento da SEFAZ pra Receita 1023), `rotina_agg` é criado como
+    # `pd.DataFrame(columns=[...])`, que tem dtype "object" em todas as colunas (DataFrame vazio sem dado
+    # nenhum pra inferir tipo). O merge propaga esse dtype "object" pra `sistema_valor_icms_st` mesmo depois
+    # do fillna(0.0) — e uma Series "object" com valores numéricos vira um TypeError em .sum() dependendo da
+    # versão do pandas/numpy. Mesmo tratamento já usado em `comparar_1076_sefaz` pra este mesmo tipo de
+    # merge.
+    comp["sefaz_calculado"] = pd.to_numeric(comp["sefaz_calculado"], errors="coerce").fillna(0.0)
+    comp["sistema_valor_icms_st"] = pd.to_numeric(comp["sistema_valor_icms_st"], errors="coerce").fillna(0.0)
     comp["tem_detalhe_item"] = comp["tem_detalhe_item"].fillna(False).astype(bool)
     comp["encontrada_1096"] = comp["nf_numero"].isin(
         rotina["nf_numero"] if not rotina.empty else []
