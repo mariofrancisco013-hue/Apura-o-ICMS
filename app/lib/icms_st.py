@@ -70,17 +70,36 @@ COLS_1076_RESUMIDO_RAW = [
     "base_st_final", "valor_icms_st", "_col16",
 ]
 
-# Colunas posicionais do export ANALÍTICO da Rotina 1076 (achado em 12/08/2026, arquivo real do usuário
-# "1076 filial 3 analítico.xlsx" — mesma sheet "Report", sem cabeçalho, 20 colunas). Terceiro layout: item a
-# item (uma linha por item, igual o layout "item a item"), mas com fornecedor código+nome+CNPJ juntos na
-# mesma linha (igual o layout "resumido por NF") — os dois "modos" combinados. Usado só na aba Antecipado
-# (Receita 1023), importado numa tabela separada (rotina_1076_antecipado_itens) — ver parse_rotina_1076_
-# analitico. Colunas c9 ("valor_produto_bruto" = valor_produto + icms_proprio_base, conferido por soma
-# exata), c14 e c19 têm baixo valor informativo (c14 quase sempre 0) — não são gravadas.
-COLS_1076_ANALITICO_RAW = [
-    "dt_entrada", "dt_emissao", "dt_selo", "nf_numero", "fornecedor", "fornecedor_cnpj", "produto",
-    "ncm", "uf", "_col9", "valor_produto", "icms_proprio_base", "aliq_icms_proprio", "icms_proprio",
-    "_col14", "aliq_st", "aliq_cheia", "base_st_final", "valor_icms_st", "_col19",
+# Colunas posicionais do "Relatório 1096" do Winthor (achado em 12/08/2026, arquivo real do usuário "1096
+# relatório 13.xlsx" — sheet "Report", sem cabeçalho, 18 colunas). Usado SÓ na aba Antecipado (Receita
+# 1023) — pedido do usuário em 12/08/2026: "utilize esse relatorio no lugar do da 1076, porque o codigo
+# 1023 é antecipado, então não vai ser apresentado no da 1076" (a Receita 1023/Antecipado não passa pela
+# Rotina 1076 — por isso a antiga tentativa de usar um layout "analítico" da 1076 pra essa aba foi
+# descartada e substituída por este relatório, que é o correto). Coluna 0 confirmada como número da NF
+# (bate com a NF 20354, já validada contra a SEFAZ em 597,50 — ver docstring do módulo). Colunas 10/11
+# (aliq_icms/valor_icms) confirmadas pelo usuário como a alíquota/valor do ICMS Antecipado por item
+# (pergunta direta em 12/08/2026: "coluna 12 é a do ICMS", numeração 1-based do Excel = índice 11 aqui).
+# Coluna 7 (valor_produto) confirmada pelo usuário como o valor do produto a usar (pergunta direta: "O DA
+# COLUNA 8", numeração 1-based = índice 7 aqui) — a coluna 6 (valor_produto_bruto) é o mesmo valor antes de
+# desconto/IPI em ~1,6% das linhas, não usada. Coluna 5 (valor_desconto) e col12 (código sem semântica
+# confirmada) têm baixo valor informativo — não são gravadas. Colunas 13-17 são ICMS líquido/PIS/COFINS do
+# item (guardadas só como PIS/COFINS, que têm semântica clara pelas alíquotas 1,65%/0,65% e 7,6%/3% —
+# valor_liquido_pos_icms não é gravado, redundante com valor_produto − valor_icms).
+#
+# IMPORTANTE: o valor_icms daqui é calculado item a item pela alíquota informada na própria linha do
+# relatório — NÃO passa pelo cálculo de ST/MVA da Rotina 1076, então a soma por NF pode não bater exato com
+# o "Calculado" da SEFAZ pra mesma NF (são apurados de formas diferentes). O valor de referência pra
+# conferência continua sendo o da SEFAZ — ver listar_1023_antecipado.
+COLS_1096_RAW = [
+    "nf_numero", "dt_emissao", "produto", "cfop", "quantidade", "valor_desconto", "valor_produto_bruto",
+    "valor_produto", "cst", "base_icms", "aliq_icms", "valor_icms", "_col12", "valor_liquido_pos_icms",
+    "aliq_pis", "valor_pis", "aliq_cofins", "valor_cofins",
+]
+
+# Colunas finais da tabela relatorio_1096_itens (sem competencia_id/id/importado_em).
+COLS_1096_TABELA = [
+    "nf_numero", "dt_emissao", "produto_codigo", "produto_descricao", "cfop", "quantidade", "valor_produto",
+    "cst", "base_icms", "aliq_icms", "valor_icms", "aliq_pis", "valor_pis", "aliq_cofins", "valor_cofins",
 ]
 
 # Colunas finais da tabela rotina_1076_itens (sem competencia_id/id/importado_em, que ficam de fora daqui).
@@ -231,57 +250,46 @@ def _parse_1076_resumido(df: pd.DataFrame) -> pd.DataFrame:
     return out[COLS_1076_TABELA]
 
 
-def _parse_1076_analitico(df: pd.DataFrame) -> pd.DataFrame:
-    """Layout analítico (20 colunas) — uma linha por item de entrada (igual o item a item), com fornecedor
-    código+nome+CNPJ juntos na mesma linha (igual o resumido por NF). Só usado na aba Antecipado."""
+def _parse_1096(df: pd.DataFrame) -> pd.DataFrame:
+    """Relatório 1096 (18 colunas) — uma linha por item de entrada, usado só na aba Antecipado (Receita
+    1023). Ver comentário de COLS_1096_RAW pra semântica de cada coluna e o porquê deste relatório
+    substituir a tentativa anterior de usar a Rotina 1076 nesta aba."""
     df = df.copy()
-    df.columns = COLS_1076_ANALITICO_RAW
+    df.columns = COLS_1096_RAW
 
-    fornecedor_split = df["fornecedor"].apply(_dividir_codigo_nome)
     produto_split = df["produto"].apply(_dividir_codigo_nome)
 
     out = pd.DataFrame({"nf_numero": df["nf_numero"].astype(str).str.strip()})
-    out["dt_entrada"] = pd.to_datetime(df["dt_entrada"], errors="coerce").dt.date
     out["dt_emissao"] = pd.to_datetime(df["dt_emissao"], errors="coerce").dt.date
-    out["dt_selo"] = pd.to_datetime(df["dt_selo"], errors="coerce").dt.date
-    out["num_seq_ent"] = None
     out["produto_codigo"] = produto_split.apply(lambda par: par[0])
     out["produto_descricao"] = produto_split.apply(lambda par: par[1])
-    out["ncm"] = df["ncm"].astype(str)
-    out["uf"] = df["uf"]
+    out["cfop"] = df["cfop"].astype(str)
+    out["quantidade"] = pd.to_numeric(df["quantidade"], errors="coerce").fillna(0).astype(float)
     out["valor_produto"] = pd.to_numeric(df["valor_produto"], errors="coerce").fillna(0).astype(float)
-    out["icms_proprio"] = pd.to_numeric(df["icms_proprio"], errors="coerce").fillna(0).astype(float)
-    out["base_st"] = pd.to_numeric(df["icms_proprio_base"], errors="coerce").fillna(0).astype(float)
-    out["col13"] = pd.to_numeric(df["aliq_icms_proprio"], errors="coerce").fillna(0).astype(float)
-    out["aliq_st"] = pd.to_numeric(df["aliq_st"], errors="coerce").fillna(0).astype(float)
-    out["aliq_cheia"] = df["aliq_cheia"].astype(str)
-    out["base_st_final"] = pd.to_numeric(df["base_st_final"], errors="coerce").fillna(0).astype(float)
-    out["valor_icms_st"] = pd.to_numeric(df["valor_icms_st"], errors="coerce").fillna(0).astype(float)
-    out["formato_origem"] = "analitico"
-    out["fornecedor_codigo"] = fornecedor_split.apply(lambda par: par[0])
-    out["fornecedor_nome"] = fornecedor_split.apply(lambda par: par[1])
-    out["fornecedor_cnpj"] = df["fornecedor_cnpj"]
-    return out[COLS_1076_TABELA]
+    out["cst"] = df["cst"].astype(str)
+    out["base_icms"] = pd.to_numeric(df["base_icms"], errors="coerce").fillna(0).astype(float)
+    out["aliq_icms"] = pd.to_numeric(df["aliq_icms"], errors="coerce").fillna(0).astype(float)
+    out["valor_icms"] = pd.to_numeric(df["valor_icms"], errors="coerce").fillna(0).astype(float)
+    out["aliq_pis"] = pd.to_numeric(df["aliq_pis"], errors="coerce").fillna(0).astype(float)
+    out["valor_pis"] = pd.to_numeric(df["valor_pis"], errors="coerce").fillna(0).astype(float)
+    out["aliq_cofins"] = pd.to_numeric(df["aliq_cofins"], errors="coerce").fillna(0).astype(float)
+    out["valor_cofins"] = pd.to_numeric(df["valor_cofins"], errors="coerce").fillna(0).astype(float)
+    return out[COLS_1096_TABELA]
 
 
-def parse_rotina_1076_analitico(arquivo) -> pd.DataFrame:
-    """Lê o export ANALÍTICO da Rotina 1076 do Winthor (.xls/.xlsx, sheet "Report", sem cabeçalho, 20
-    colunas) — pedido do usuário em 12/08/2026: "permita uma nova importação da 1076 com os itens nessa
-    aba sem interferir nas abas interestadual e interno" + "Você pode colocar 3 pontos de importação, 1076
-    sintetico, 1076 analitico e o da sefaz". Import separado do `parse_rotina_1076` (que só aceita os
-    layouts "item a item"/"resumido por NF", usados pelas abas Interestadual/Interno) — devolve o mesmo
-    formato de DataFrame (COLS_1076_TABELA), mas quem chama esta função deve gravar em
-    `rotina_1076_antecipado_itens` (ver `salvar_rotina_1076_antecipado`), NUNCA em `rotina_1076_itens`, pra
-    não interferir nas outras duas abas."""
+def parse_relatorio_1096(arquivo) -> pd.DataFrame:
+    """Lê o Relatório 1096 do Winthor (.xls/.xlsx, sheet "Report", sem cabeçalho, 18 colunas) — pedido do
+    usuário em 12/08/2026: "utilize esse relatorio no lugar do da 1076, porque o codigo 1023 é antecipado,
+    então não vai ser apresentado no da 1076". Import isolado, usado só pela aba Antecipado (Receita 1023):
+    quem chama esta função deve gravar em `relatorio_1096_itens` (ver `salvar_relatorio_1096`), NUNCA em
+    `rotina_1076_itens`, pra não interferir nas abas Interestadual/Interno."""
     df = pd.read_excel(arquivo, sheet_name="Report", header=None, engine="calamine")
-    if len(df.columns) != len(COLS_1076_ANALITICO_RAW):
+    if len(df.columns) != len(COLS_1096_RAW):
         raise ValueError(
-            f"Arquivo da Rotina 1076 Analítico tem {len(df.columns)} colunas — esperado "
-            f"{len(COLS_1076_ANALITICO_RAW)}. Confira se é mesmo o export \"analítico\" (item a item, com "
-            f"fornecedor) — os layouts \"item a item\" (18 colunas) e \"resumido por NF\" (17 colunas) "
-            f"devem ser importados no campo \"1076 Sintético\", não aqui."
+            f"Arquivo do Relatório 1096 tem {len(df.columns)} colunas — esperado {len(COLS_1096_RAW)}. "
+            f"Confira se é mesmo o export do Relatório 1096 (item a item, com CFOP/CST/PIS/COFINS)."
         )
-    return _parse_1076_analitico(df)
+    return _parse_1096(df)
 
 
 def parse_rotina_1076(arquivo) -> pd.DataFrame:
@@ -381,33 +389,30 @@ def carregar_rotina_1076(session, competencia_id: int) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=COLS_1076_TABELA)
 
 
-def salvar_rotina_1076_antecipado(session, competencia_id: int, df: pd.DataFrame) -> int:
+def salvar_relatorio_1096(session, competencia_id: int, df: pd.DataFrame) -> int:
     """Mesmo padrão de salvar_rotina_1076 (apagar+inserir por competência), mas numa tabela TOTALMENTE
-    SEPARADA (`rotina_1076_antecipado_itens`) — pedido do usuário em 12/08/2026: "permita uma nova
-    importação da 1076 com os itens nessa aba sem interferir nas abas interestadual e interno". Reimportar
-    aqui nunca apaga/substitui nada em `rotina_1076_itens` (usada por Interestadual/Interno), e vice-versa."""
-    session.execute(
-        text("delete from rotina_1076_antecipado_itens where competencia_id = :cid"), {"cid": competencia_id}
-    )
+    SEPARADA (`relatorio_1096_itens`) — pedido do usuário em 12/08/2026: "utilize esse relatorio no lugar
+    do da 1076" pra aba Antecipado, mantendo o mesmo princípio de isolamento já usado nesta aba: reimportar
+    aqui nunca afeta `rotina_1076_itens` (usada por Interestadual/Interno), e vice-versa."""
+    session.execute(text("delete from relatorio_1096_itens where competencia_id = :cid"), {"cid": competencia_id})
     if not df.empty:
         out = df.copy()
         out.insert(0, "competencia_id", competencia_id)
         out.to_sql(
-            "rotina_1076_antecipado_itens", session.bind, if_exists="append", index=False, method="multi",
+            "relatorio_1096_itens", session.bind, if_exists="append", index=False, method="multi",
             chunksize=500,
         )
     session.commit()
     return len(df)
 
 
-def carregar_rotina_1076_antecipado(session, competencia_id: int) -> pd.DataFrame:
+def carregar_relatorio_1096(session, competencia_id: int) -> pd.DataFrame:
     rows = session.execute(text("""
-        select dt_entrada, dt_emissao, dt_selo, num_seq_ent, nf_numero, produto_codigo, produto_descricao,
-               ncm, uf, valor_produto, icms_proprio, base_st, col13, aliq_st, aliq_cheia, base_st_final,
-               valor_icms_st, formato_origem, fornecedor_codigo, fornecedor_nome, fornecedor_cnpj
-        from rotina_1076_antecipado_itens where competencia_id = :cid order by nf_numero, num_seq_ent
+        select nf_numero, dt_emissao, produto_codigo, produto_descricao, cfop, quantidade, valor_produto,
+               cst, base_icms, aliq_icms, valor_icms, aliq_pis, valor_pis, aliq_cofins, valor_cofins
+        from relatorio_1096_itens where competencia_id = :cid order by nf_numero, produto_codigo
     """), {"cid": competencia_id}).mappings().all()
-    return pd.DataFrame(rows, columns=COLS_1076_TABELA)
+    return pd.DataFrame(rows, columns=COLS_1096_TABELA)
 
 
 def carregar_sefaz_lancamentos(session, competencia_id: int) -> pd.DataFrame:
@@ -491,22 +496,22 @@ def comparar_1076_sefaz(session, competencia_id: int, receita_filtro: str = "103
 # padrão — o usuário já pode trocar pra "1023" no seletor de Receita da tela pra ver o comparativo NF a
 # NF), mas não tinha, até então, um jeito de ver o DETALHE de produtos de cada NF — só o agregado.
 #
-# Estas duas funções leem de `rotina_1076_antecipado_itens` — tabela SEPARADA de `rotina_1076_itens` (usada
-# pelas abas Interestadual/Interno). Pedido do usuário, também em 12/08/2026: "permita uma nova importação
-# da 1076 com os itens nessa aba sem interferir nas abas interestadual e interno" — por isso a aba
-# Antecipado tem seu próprio import (campo "1076 Analítico"), gravado numa tabela isolada; reimportar ali
-# nunca mexe no que as outras duas abas usam.
+# Estas duas funções leem de `relatorio_1096_itens` — tabela SEPARADA de `rotina_1076_itens` (usada pelas
+# abas Interestadual/Interno). Ainda em 12/08/2026, o usuário corrigiu a fonte do detalhe: "utilize esse
+# relatorio no lugar do da 1076, porque o codigo 1023 é antecipado, então não vai ser apresentado no da
+# 1076" — a Receita 1023/Antecipado simplesmente não passa pela Rotina 1076, então o detalhe de produtos
+# tem que vir do Relatório 1096 (campo de import próprio, "Relatório 1096", isolado das outras duas abas).
 # ==============================================================================================
 
 def listar_1023_antecipado(session, competencia_id: int) -> pd.DataFrame:
     """Uma linha por NF de Receita 1023 (não filtra por UF — 1023 não tem essa distinção Interno/
     Interestadual, ao contrário da 1031). Colunas: nf_numero, sefaz_calculado, sistema_valor_icms_st (soma
-    da Rotina 1076 Antecipado pra essa NF), encontrada_1076 (bool — a NF aparece em pelo menos uma linha do
-    import Antecipado) e tem_detalhe_item (bool — True só se ALGUMA linha da NF veio de um layout com
-    produto/NCM — "item" ou "analitico"; o layout resumido por NF não tem produto/NCM, só o valor agregado,
-    então não dá pra listar produto por produto nesse caso — ver listar_itens_1076_por_nf)."""
+    de valor_icms do Relatório 1096 pra essa NF — nome mantido por continuidade, mas aqui é ICMS Antecipado
+    calculado item a item, não ICMS ST via MVA; pode não bater exato com sefaz_calculado, ver COLS_1096_RAW),
+    encontrada_1096 (bool — a NF aparece em pelo menos uma linha do Relatório 1096 importado) e
+    tem_detalhe_item (bool — True sempre que a NF tem alguma linha no 1096, que é sempre item a item)."""
     sefaz = carregar_sefaz_lancamentos(session, competencia_id)
-    rotina = carregar_rotina_1076_antecipado(session, competencia_id)
+    rotina = carregar_relatorio_1096(session, competencia_id)
 
     sefaz_1023 = sefaz[sefaz["receita"] == "1023"] if not sefaz.empty else sefaz
     sefaz_agg = (
@@ -518,37 +523,30 @@ def listar_1023_antecipado(session, competencia_id: int) -> pd.DataFrame:
     if rotina.empty:
         rotina_agg = pd.DataFrame(columns=["nf_numero", "sistema_valor_icms_st", "tem_detalhe_item"])
     else:
-        rotina_agg = rotina.groupby("nf_numero", as_index=False).agg(
-            sistema_valor_icms_st=("valor_icms_st", "sum"),
-            tem_detalhe_item=("formato_origem", lambda s: bool(s.isin(["item", "analitico"]).any())),
-        )
+        rotina_agg = rotina.groupby("nf_numero", as_index=False).agg(sistema_valor_icms_st=("valor_icms", "sum"))
+        rotina_agg["tem_detalhe_item"] = True
 
     comp = sefaz_agg.merge(rotina_agg, on="nf_numero", how="left")
     comp["sistema_valor_icms_st"] = comp["sistema_valor_icms_st"].fillna(0.0)
     comp["tem_detalhe_item"] = comp["tem_detalhe_item"].fillna(False).astype(bool)
-    comp["encontrada_1076"] = comp["nf_numero"].isin(
+    comp["encontrada_1096"] = comp["nf_numero"].isin(
         rotina["nf_numero"] if not rotina.empty else []
     )
     return comp.sort_values("nf_numero").reset_index(drop=True)[
-        ["nf_numero", "sefaz_calculado", "sistema_valor_icms_st", "encontrada_1076", "tem_detalhe_item"]
+        ["nf_numero", "sefaz_calculado", "sistema_valor_icms_st", "encontrada_1096", "tem_detalhe_item"]
     ]
 
 
-def listar_itens_1076_por_nf(session, competencia_id: int, nf_numero: str) -> pd.DataFrame:
-    """Detalhe de produtos de uma NF específica na Rotina 1076 Antecipado — só tem linhas quando a NF foi
-    importada num layout com produto/NCM ("item" ou "analitico"; no layout resumido por NF,
-    produto_codigo/produto_descricao/ncm ficam NULL, então não entram aqui). Nota: a Rotina 1076 não traz
-    CFOP, CST, Quantidade nem Valor Unitário (só existem no detalhe de NF do próprio portal da SEFAZ, que
-    não é importado nesta plataforma) — aqui só dá pra mostrar o que a 1076 realmente tem: produto, NCM,
-    valor do produto (total, não unitário), alíquota ST e valor de ICMS ST por item."""
-    rotina = carregar_rotina_1076_antecipado(session, competencia_id)
+def listar_itens_1096_por_nf(session, competencia_id: int, nf_numero: str) -> pd.DataFrame:
+    """Detalhe de produtos de uma NF específica no Relatório 1096 — substitui completamente o uso da Rotina
+    1076 nesta aba (ver comentário acima). Devolve produto, quantidade, valor do produto e o ICMS
+    calculado item a item (alíquota e valor) — o Relatório 1096 não traz NCM."""
+    rotina = carregar_relatorio_1096(session, competencia_id)
     if rotina.empty:
         return rotina
-    itens = rotina[
-        (rotina["nf_numero"] == str(nf_numero)) & (rotina["formato_origem"].isin(["item", "analitico"]))
-    ]
+    itens = rotina[rotina["nf_numero"] == str(nf_numero)]
     return itens[
-        ["produto_codigo", "produto_descricao", "ncm", "valor_produto", "aliq_st", "valor_icms_st"]
+        ["produto_codigo", "produto_descricao", "quantidade", "valor_produto", "aliq_icms", "valor_icms"]
     ].reset_index(drop=True)
 
 

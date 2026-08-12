@@ -12,8 +12,8 @@ from lib.icms_st import (
     parse_cadastro_fornecedores_st, salvar_cadastro_fornecedores_st, listar_cadastro_fornecedores_st,
     STATUS_NAO_LOCALIZADO, JUSTIFICATIVAS_TODAS,
     carregar_justificativas, salvar_justificativas,
-    listar_1023_antecipado, listar_itens_1076_por_nf,
-    parse_rotina_1076_analitico, salvar_rotina_1076_antecipado, carregar_rotina_1076_antecipado,
+    listar_1023_antecipado, listar_itens_1096_por_nf,
+    parse_relatorio_1096, salvar_relatorio_1096, carregar_relatorio_1096,
 )
 from lib.formatacao import formatar_moeda, rotulo_empresa
 from sqlalchemy import text
@@ -99,24 +99,20 @@ with c1:
             st.error(str(e))
 
 with c2:
-    st.markdown("**1076 Analítico**")
+    st.markdown("**Relatório 1096**")
     st.caption(
-        "Layout item a item com fornecedor junto na mesma linha (20 colunas) — pedido do usuário em "
-        "12/08/2026: \"permita uma nova importação da 1076 com os itens nessa aba sem interferir nas abas "
-        "interestadual e interno\". Grava numa tabela separada, usada **só** pela aba **Antecipado "
-        "(Receita 1023)** — reimportar aqui nunca afeta Interestadual/Interno, e vice-versa."
+        "Item a item, com CFOP/CST/PIS/COFINS (18 colunas) — pedido do usuário em 12/08/2026: \"utilize "
+        "esse relatorio no lugar do da 1076, porque o codigo 1023 é antecipado, então não vai ser "
+        "apresentado no da 1076\". Grava numa tabela separada, usada **só** pela aba **Antecipado (Receita "
+        "1023)** — reimportar aqui nunca afeta Interestadual/Interno, e vice-versa."
     )
-    arq_1076_antc = st.file_uploader(
-        "Arquivo da Rotina 1076 (Analítico)", type=["xls", "xlsx"], key="upload_1076_antecipado"
-    )
-    if st.button(
-        "📥 Importar 1076 Analítico", key="btn_importar_1076_antecipado", disabled=arq_1076_antc is None
-    ):
+    arq_1096 = st.file_uploader("Arquivo do Relatório 1096", type=["xls", "xlsx"], key="upload_relatorio_1096")
+    if st.button("📥 Importar Relatório 1096", key="btn_importar_1096", disabled=arq_1096 is None):
         try:
             _garantir_competencia()
-            df = parse_rotina_1076_analitico(arq_1076_antc)
-            n = salvar_rotina_1076_antecipado(session, cid, df)
-            st.success(f"{n} item(ns) importado(s) da Rotina 1076 (Analítico).")
+            df = parse_relatorio_1096(arq_1096)
+            n = salvar_relatorio_1096(session, cid, df)
+            st.success(f"{n} item(ns) importado(s) do Relatório 1096.")
             st.rerun()
         except ValueError as e:
             st.error(str(e))
@@ -382,34 +378,38 @@ with aba_antecipado:
     st.subheader("Receita 1023 (ICMS Antecipado) — totalizador por NF + produtos")
     st.caption(
         "Pedido do usuário em 12/08/2026: totalizador por NF de Receita 1023, com o detalhe dos produtos "
-        "daquela nota quando ela também está na Rotina 1076 importada no campo **\"1076 Analítico\"** (lá "
-        "em cima, em \"Importar relatórios\") — importação separada da usada pelas abas Interestadual/"
-        "Interno, então reimportar aqui não mexe nelas. A Receita 1023 não entra na comparação da aba "
-        "Interestadual (que usa a 1031 por padrão — dá pra trocar no seletor de Receita de lá pra ver o "
-        "comparativo NF a NF com a outra importação), mas continua gravada e é conferida aqui "
-        "separadamente. **Atenção**: a Rotina 1076 não traz CFOP, CST, Quantidade nem Valor Unitário — só "
-        "o que ela mesma grava (produto, NCM, valor do produto, alíquota ST e valor de ICMS ST)."
+        "daquela nota. O detalhe vem do **Relatório 1096** (campo próprio lá em cima, em \"Importar "
+        "relatórios\") — a Receita 1023/Antecipado não passa pela Rotina 1076, então não tinha como "
+        "aparecer lá (correção do usuário em 12/08/2026: \"utilize esse relatorio no lugar do da 1076, "
+        "porque o codigo 1023 é antecipado, então não vai ser apresentado no da 1076\"). Import separado "
+        "da usada pelas abas Interestadual/Interno, então reimportar aqui não mexe nelas. A Receita 1023 "
+        "não entra na comparação da aba Interestadual (que usa a 1031 por padrão — dá pra trocar no "
+        "seletor de Receita de lá pra ver o comparativo NF a NF com a outra importação), mas continua "
+        "gravada e é conferida aqui separadamente. **Atenção**: o valor de ICMS do Relatório 1096 é "
+        "calculado item a item pela alíquota informada em cada linha — não passa pelo cálculo de ST/MVA, "
+        "então o total por NF pode não bater exato com o \"Calculado\" da SEFAZ; o valor de referência "
+        "pra conferência continua sendo o da SEFAZ (coluna \"SEFAZ (Calculado)\")."
     )
 
     antecipado = listar_1023_antecipado(session, cid)
     if antecipado.empty:
-        st.info("Nenhuma NF de Receita 1023 encontrada — importe o arquivo no campo \"1076 Analítico\" acima.")
+        st.info("Nenhuma NF de Receita 1023 encontrada — importe o arquivo no campo \"Relatório 1096\" acima.")
     else:
         ma1, ma2 = st.columns(2)
         ma1.metric("Total SEFAZ (Receita 1023)", formatar_moeda(antecipado["sefaz_calculado"].sum()))
         ma2.metric(
-            "Total na Rotina 1076 (mesmas NFs)", formatar_moeda(antecipado["sistema_valor_icms_st"].sum())
+            "Total no Relatório 1096 (mesmas NFs)", formatar_moeda(antecipado["sistema_valor_icms_st"].sum())
         )
 
         tabela_antc = antecipado.copy()
         tabela_antc["sefaz_calculado"] = tabela_antc["sefaz_calculado"].apply(_fmt)
         tabela_antc["sistema_valor_icms_st"] = tabela_antc["sistema_valor_icms_st"].apply(_fmt)
-        tabela_antc["encontrada_1076"] = tabela_antc["encontrada_1076"].map({True: "✅ Sim", False: "❌ Não"})
+        tabela_antc["encontrada_1096"] = tabela_antc["encontrada_1096"].map({True: "✅ Sim", False: "❌ Não"})
         tabela_antc["tem_detalhe_item"] = tabela_antc["tem_detalhe_item"].map({True: "Sim", False: "—"})
         st.dataframe(
             tabela_antc.rename(columns={
                 "nf_numero": "NF", "sefaz_calculado": "SEFAZ (Calculado)",
-                "sistema_valor_icms_st": "Total na Rotina 1076", "encontrada_1076": "Encontrada na 1076?",
+                "sistema_valor_icms_st": "Total no Relatório 1096", "encontrada_1096": "Encontrada no 1096?",
                 "tem_detalhe_item": "Tem detalhe de produtos?",
             }),
             use_container_width=True, hide_index=True, height=250,
@@ -417,34 +417,32 @@ with aba_antecipado:
 
         nfs_com_detalhe = antecipado.loc[antecipado["tem_detalhe_item"], "nf_numero"].tolist()
         if not nfs_com_detalhe:
-            st.caption(
-                "Nenhuma NF de Receita 1023 tem detalhe de produtos disponível (só o layout resumido por "
-                "NF foi importado pra elas, sem produto/NCM item a item)."
-            )
+            st.caption("Nenhuma NF de Receita 1023 foi encontrada no Relatório 1096 importado.")
         else:
             nf_escolhida = st.selectbox(
                 "Ver produtos de uma NF", options=nfs_com_detalhe, key="select_nf_antecipado"
             )
-            itens_nf = listar_itens_1076_por_nf(session, cid, nf_escolhida)
+            itens_nf = listar_itens_1096_por_nf(session, cid, nf_escolhida)
             itens_fmt = itens_nf.copy()
             itens_fmt["valor_produto"] = itens_fmt["valor_produto"].apply(_fmt)
-            itens_fmt["valor_icms_st"] = itens_fmt["valor_icms_st"].apply(_fmt)
-            itens_fmt["aliq_st"] = itens_fmt["aliq_st"].apply(lambda v: f"{v:.2f}%")
+            itens_fmt["valor_icms"] = itens_fmt["valor_icms"].apply(_fmt)
+            itens_fmt["aliq_icms"] = itens_fmt["aliq_icms"].apply(lambda v: f"{v:.2f}%")
             st.dataframe(
                 itens_fmt.rename(columns={
-                    "produto_codigo": "Código", "produto_descricao": "Produto", "ncm": "NCM",
-                    "valor_produto": "Valor do Produto", "aliq_st": "Alíquota ST", "valor_icms_st": "ICMS ST",
+                    "produto_codigo": "Código", "produto_descricao": "Produto", "quantidade": "Quantidade",
+                    "valor_produto": "Valor do Produto", "aliq_icms": "Alíquota ICMS",
+                    "valor_icms": "ICMS Antecipado",
                 }),
                 use_container_width=True, hide_index=True,
             )
             st.caption(
-                f"Total de ICMS ST desta NF na Rotina 1076: {_fmt(itens_nf['valor_icms_st'].sum())} "
-                f"({len(itens_nf)} produto(s))."
+                f"Total de ICMS Antecipado desta NF no Relatório 1096: "
+                f"{_fmt(itens_nf['valor_icms'].sum())} ({len(itens_nf)} produto(s))."
             )
 
 with st.expander("Ver itens importados (detalhe, sem agregação por NF)"):
-    aba_1076, aba_1076_antc, aba_sefaz = st.tabs(
-        ["Rotina 1076 Sintético (itens)", "Rotina 1076 Analítico (Antecipado)", "Lançamentos da SEFAZ"]
+    aba_1076, aba_1096, aba_sefaz = st.tabs(
+        ["Rotina 1076 Sintético (itens)", "Relatório 1096 (Antecipado)", "Lançamentos da SEFAZ"]
     )
     with aba_1076:
         df_1076 = carregar_rotina_1076(session, cid)
@@ -452,12 +450,12 @@ with st.expander("Ver itens importados (detalhe, sem agregação por NF)"):
             st.caption("Nada importado ainda.")
         else:
             st.dataframe(df_1076, use_container_width=True, height=400, hide_index=True)
-    with aba_1076_antc:
-        df_1076_antc = carregar_rotina_1076_antecipado(session, cid)
-        if df_1076_antc.empty:
-            st.caption("Nada importado ainda (campo \"1076 Analítico\" acima).")
+    with aba_1096:
+        df_1096 = carregar_relatorio_1096(session, cid)
+        if df_1096.empty:
+            st.caption("Nada importado ainda (campo \"Relatório 1096\" acima).")
         else:
-            st.dataframe(df_1076_antc, use_container_width=True, height=400, hide_index=True)
+            st.dataframe(df_1096, use_container_width=True, height=400, hide_index=True)
     with aba_sefaz:
         df_sefaz = carregar_sefaz_lancamentos(session, cid)
         if df_sefaz.empty:
