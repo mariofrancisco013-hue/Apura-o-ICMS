@@ -424,6 +424,30 @@ JUSTIFICATIVAS_TODAS = list(dict.fromkeys(JUSTIFICATIVAS_DIVERGENTE + JUSTIFICAT
 COLS_JUSTIFICATIVAS = ["nf_numero", "justificativa", "observacao", "nao_entra_calculo"]
 
 
+def _texto_ou_none(valor):
+    """Normaliza um valor vindo do st.data_editor pra str "limpa" ou None. Achado em produção (12/08/2026,
+    erro real do usuário: "AttributeError ... justificativa = (row.get('justificativa') or '').strip()"):
+    célula vazia de SelectboxColumn/TextColumn volta do data_editor como NaN (float), não None — e
+    `nan or ""` NÃO cai no fallback, porque bool(nan) é True em Python (é um float não-zero) — daí o
+    `.strip()` era chamado num float e quebrava. Esta função trata None, NaN e string igual."""
+    if valor is None:
+        return None
+    if isinstance(valor, float) and pd.isna(valor):
+        return None
+    texto = str(valor).strip()
+    return texto or None
+
+
+def _bool_ou_false(valor):
+    """Mesmo problema do `_texto_ou_none` acima, mas pro CheckboxColumn: célula vazia/NaN não deve virar
+    True (bool(nan) é True em Python)."""
+    if valor is None:
+        return False
+    if isinstance(valor, float) and pd.isna(valor):
+        return False
+    return bool(valor)
+
+
 def carregar_justificativas(session, competencia_id: int) -> pd.DataFrame:
     rows = session.execute(text("""
         select nf_numero, justificativa, observacao, nao_entra_calculo
@@ -446,9 +470,9 @@ def salvar_justificativas(session, competencia_id: int, df: pd.DataFrame, usuari
     app/pages/5_ICMS_Substituicao.py) — cobre qualquer status, não só divergência."""
     n = 0
     for _, row in df.iterrows():
-        justificativa = (row.get("justificativa") or "").strip() or None
-        observacao = (row.get("observacao") or "").strip() or None
-        nao_entra_calculo = bool(row.get("nao_entra_calculo") or False)
+        justificativa = _texto_ou_none(row.get("justificativa"))
+        observacao = _texto_ou_none(row.get("observacao"))
+        nao_entra_calculo = _bool_ou_false(row.get("nao_entra_calculo"))
         if not justificativa and not observacao and not nao_entra_calculo:
             session.execute(text("""
                 delete from icms_st_justificativas where competencia_id = :cid and nf_numero = :nf
