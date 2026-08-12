@@ -14,6 +14,7 @@ from lib.icms_st import (
     carregar_justificativas, salvar_justificativas,
     listar_1023_antecipado, listar_itens_1096_por_nf,
     parse_relatorio_1096, salvar_relatorio_1096, carregar_relatorio_1096,
+    JUSTIFICATIVAS_ANTECIPADO, carregar_justificativa_antecipado, salvar_justificativa_antecipado,
 )
 from lib.formatacao import formatar_moeda, rotulo_empresa
 from sqlalchemy import text
@@ -375,70 +376,74 @@ with aba_interno:
 
 # ============================================================================================
 with aba_antecipado:
-    st.subheader("Receita 1023 (ICMS Antecipado) — totalizador por NF + produtos")
+    st.subheader("Receita 1023 (ICMS Antecipado) — conferência por NF + produtos")
     st.caption(
-        "Pedido do usuário em 12/08/2026: totalizador por NF de Receita 1023, com o detalhe dos produtos "
-        "daquela nota. O detalhe vem do **Relatório 1096** (campo próprio lá em cima, em \"Importar "
-        "relatórios\") — a Receita 1023/Antecipado não passa pela Rotina 1076, então não tinha como "
-        "aparecer lá (correção do usuário em 12/08/2026: \"utilize esse relatorio no lugar do da 1076, "
-        "porque o codigo 1023 é antecipado, então não vai ser apresentado no da 1076\"). Import separado "
-        "da usada pelas abas Interestadual/Interno, então reimportar aqui não mexe nelas. A Receita 1023 "
-        "não entra na comparação da aba Interestadual (que usa a 1031 por padrão — dá pra trocar no "
-        "seletor de Receita de lá pra ver o comparativo NF a NF com a outra importação), mas continua "
-        "gravada e é conferida aqui separadamente. **Atenção**: o valor de ICMS do Relatório 1096 é "
-        "calculado item a item pela alíquota informada em cada linha — não passa pelo cálculo de ST/MVA, "
-        "então o total por NF pode não bater exato com o \"Calculado\" da SEFAZ; o valor de referência "
-        "pra conferência continua sendo o da SEFAZ (coluna \"SEFAZ (Calculado)\")."
+        "Pedido do usuário em 12/08/2026: por NF de Receita 1023, conferir se ela está no **Relatório "
+        "1096** (campo próprio lá em cima, em \"Importar relatórios\") e, se estiver, listar os produtos "
+        "dela — a Receita 1023/Antecipado não passa pela Rotina 1076, então o detalhe vem de um relatório "
+        "separado. Import isolado, não mexe nas abas Interestadual/Interno. Pedido do usuário, ainda em "
+        "12/08/2026: \"não precisa bater o valor com a 1096, basta conferir se tem lá ou não\" — por isso "
+        "esta aba não compara mais valores, só presença da NF, com um campo de Justificativa (Validado / "
+        "Correção Sefaz) pra registrar a conclusão da conferência."
     )
 
     antecipado = listar_1023_antecipado(session, cid)
     if antecipado.empty:
         st.info("Nenhuma NF de Receita 1023 encontrada — importe o arquivo no campo \"Relatório 1096\" acima.")
     else:
-        ma1, ma2 = st.columns(2)
-        ma1.metric("Total SEFAZ (Receita 1023)", formatar_moeda(antecipado["sefaz_calculado"].sum()))
-        ma2.metric(
-            "Total no Relatório 1096 (mesmas NFs)", formatar_moeda(antecipado["sistema_valor_icms_st"].sum())
+        n_encontradas = int(antecipado["encontrada_1096"].sum())
+        n_nao_encontradas = len(antecipado) - n_encontradas
+
+        ma1, ma2, ma3 = st.columns(3)
+        ma1.metric("NFs de Receita 1023 (SEFAZ)", len(antecipado))
+        ma2.metric("✅ Encontradas no 1096", n_encontradas)
+        ma3.metric("❌ Não encontradas no 1096", n_nao_encontradas)
+
+        justificativas_antc = carregar_justificativa_antecipado(session, cid)
+        tabela_antc = antecipado.merge(justificativas_antc, on="nf_numero", how="left")
+        tabela_antc["justificativa"] = tabela_antc["justificativa"].apply(lambda v: v if pd.notna(v) else None)
+        tabela_antc["observacao"] = tabela_antc["observacao"].apply(lambda v: v if pd.notna(v) else None)
+        tabela_antc["sefaz_calculado_fmt"] = tabela_antc["sefaz_calculado"].apply(_fmt)
+        tabela_antc["encontrada_1096_fmt"] = tabela_antc["encontrada_1096"].map({True: "✅ Sim", False: "❌ Não"})
+
+        tabela_antc_editada = st.data_editor(
+            tabela_antc,
+            use_container_width=True, hide_index=True, height=350, key="editor_justificativa_antecipado",
+            column_config={
+                "nf_numero": st.column_config.TextColumn("NF", disabled=True),
+                "sefaz_calculado_fmt": st.column_config.TextColumn("SEFAZ (Calculado)", disabled=True),
+                "encontrada_1096_fmt": st.column_config.TextColumn("Encontrada no 1096?", disabled=True),
+                "justificativa": st.column_config.SelectboxColumn(
+                    "Justificativa", options=JUSTIFICATIVAS_ANTECIPADO
+                ),
+                "observacao": st.column_config.TextColumn("Observação (texto livre)", width="large"),
+            },
+            column_order=[
+                "nf_numero", "sefaz_calculado_fmt", "encontrada_1096_fmt", "justificativa", "observacao",
+            ],
         )
 
-        tabela_antc = antecipado.copy()
-        tabela_antc["sefaz_calculado"] = tabela_antc["sefaz_calculado"].apply(_fmt)
-        tabela_antc["sistema_valor_icms_st"] = tabela_antc["sistema_valor_icms_st"].apply(_fmt)
-        tabela_antc["encontrada_1096"] = tabela_antc["encontrada_1096"].map({True: "✅ Sim", False: "❌ Não"})
-        tabela_antc["tem_detalhe_item"] = tabela_antc["tem_detalhe_item"].map({True: "Sim", False: "—"})
-        st.dataframe(
-            tabela_antc.rename(columns={
-                "nf_numero": "NF", "sefaz_calculado": "SEFAZ (Calculado)",
-                "sistema_valor_icms_st": "Total no Relatório 1096", "encontrada_1096": "Encontrada no 1096?",
-                "tem_detalhe_item": "Tem detalhe de produtos?",
-            }),
-            use_container_width=True, hide_index=True, height=250,
-        )
+        if st.button("💾 Salvar justificativas (Antecipado)", key="btn_salvar_justificativa_antecipado"):
+            n = salvar_justificativa_antecipado(
+                session, cid, tabela_antc_editada[["nf_numero", "justificativa", "observacao"]],
+                usuario_email=usuario_atual()["email"],
+            )
+            st.success(f"{n} justificativa(s) salva(s).")
+            st.rerun()
 
-        nfs_com_detalhe = antecipado.loc[antecipado["tem_detalhe_item"], "nf_numero"].tolist()
-        if not nfs_com_detalhe:
+        nfs_encontradas = antecipado.loc[antecipado["encontrada_1096"], "nf_numero"].tolist()
+        if not nfs_encontradas:
             st.caption("Nenhuma NF de Receita 1023 foi encontrada no Relatório 1096 importado.")
         else:
             nf_escolhida = st.selectbox(
-                "Ver produtos de uma NF", options=nfs_com_detalhe, key="select_nf_antecipado"
+                "Ver produtos de uma NF", options=nfs_encontradas, key="select_nf_antecipado"
             )
             itens_nf = listar_itens_1096_por_nf(session, cid, nf_escolhida)
-            itens_fmt = itens_nf.copy()
-            itens_fmt["valor_produto"] = itens_fmt["valor_produto"].apply(_fmt)
-            itens_fmt["valor_icms"] = itens_fmt["valor_icms"].apply(_fmt)
-            itens_fmt["aliq_icms"] = itens_fmt["aliq_icms"].apply(lambda v: f"{v:.2f}%")
             st.dataframe(
-                itens_fmt.rename(columns={
-                    "produto_codigo": "Código", "produto_descricao": "Produto", "quantidade": "Quantidade",
-                    "valor_produto": "Valor do Produto", "aliq_icms": "Alíquota ICMS",
-                    "valor_icms": "ICMS Antecipado",
-                }),
+                itens_nf.rename(columns={"produto_codigo": "Código", "produto_descricao": "Produto"}),
                 use_container_width=True, hide_index=True,
             )
-            st.caption(
-                f"Total de ICMS Antecipado desta NF no Relatório 1096: "
-                f"{_fmt(itens_nf['valor_icms'].sum())} ({len(itens_nf)} produto(s))."
-            )
+            st.caption(f"{len(itens_nf)} produto(s) desta NF no Relatório 1096.")
 
 with st.expander("Ver itens importados (detalhe, sem agregação por NF)"):
     aba_1076, aba_1096, aba_sefaz = st.tabs(

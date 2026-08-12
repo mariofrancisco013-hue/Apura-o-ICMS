@@ -496,20 +496,22 @@ def comparar_1076_sefaz(session, competencia_id: int, receita_filtro: str = "103
 # padrão — o usuário já pode trocar pra "1023" no seletor de Receita da tela pra ver o comparativo NF a
 # NF), mas não tinha, até então, um jeito de ver o DETALHE de produtos de cada NF — só o agregado.
 #
-# Estas duas funções leem de `relatorio_1096_itens` — tabela SEPARADA de `rotina_1076_itens` (usada pelas
-# abas Interestadual/Interno). Ainda em 12/08/2026, o usuário corrigiu a fonte do detalhe: "utilize esse
+# Estas funções leem de `relatorio_1096_itens` — tabela SEPARADA de `rotina_1076_itens` (usada pelas abas
+# Interestadual/Interno). Ainda em 12/08/2026, o usuário corrigiu a fonte do detalhe: "utilize esse
 # relatorio no lugar do da 1076, porque o codigo 1023 é antecipado, então não vai ser apresentado no da
 # 1076" — a Receita 1023/Antecipado simplesmente não passa pela Rotina 1076, então o detalhe de produtos
 # tem que vir do Relatório 1096 (campo de import próprio, "Relatório 1096", isolado das outras duas abas).
+#
+# Escopo simplificado, mesmo dia (12/08/2026): "na aba do antecipado não precisa bater o valor com a 1096,
+# basta conferir se tem lá ou não e nas que tiverem informar a listagem dos produtos abaixo, somente codigo
+# e descrição" — por isso listar_1023_antecipado não soma/compara mais valor_icms do Relatório 1096 (só
+# presença/ausência da NF), e listar_itens_1096_por_nf devolve só código+descrição.
 # ==============================================================================================
 
 def listar_1023_antecipado(session, competencia_id: int) -> pd.DataFrame:
     """Uma linha por NF de Receita 1023 (não filtra por UF — 1023 não tem essa distinção Interno/
-    Interestadual, ao contrário da 1031). Colunas: nf_numero, sefaz_calculado, sistema_valor_icms_st (soma
-    de valor_icms do Relatório 1096 pra essa NF — nome mantido por continuidade, mas aqui é ICMS Antecipado
-    calculado item a item, não ICMS ST via MVA; pode não bater exato com sefaz_calculado, ver COLS_1096_RAW),
-    encontrada_1096 (bool — a NF aparece em pelo menos uma linha do Relatório 1096 importado) e
-    tem_detalhe_item (bool — True sempre que a NF tem alguma linha no 1096, que é sempre item a item)."""
+    Interestadual, ao contrário da 1031). Colunas: nf_numero, sefaz_calculado, encontrada_1096 (bool — só
+    presença/ausência da NF no Relatório 1096 importado, sem comparar valor)."""
     sefaz = carregar_sefaz_lancamentos(session, competencia_id)
     rotina = carregar_relatorio_1096(session, competencia_id)
 
@@ -519,44 +521,86 @@ def listar_1023_antecipado(session, competencia_id: int) -> pd.DataFrame:
         .rename(columns={"calculado": "sefaz_calculado"})
         if not sefaz_1023.empty else pd.DataFrame(columns=["nf_numero", "sefaz_calculado"])
     )
+    # pd.to_numeric explícito: mesmo cuidado documentado no bug corrigido em 12/08/2026 (TypeError em
+    # produção) — um DataFrame vazio criado só com `columns=[...]` tem dtype "object", que pode não somar
+    # direito dependendo da versão do pandas/numpy.
+    sefaz_agg["sefaz_calculado"] = pd.to_numeric(sefaz_agg["sefaz_calculado"], errors="coerce").fillna(0.0)
 
-    if rotina.empty:
-        rotina_agg = pd.DataFrame(columns=["nf_numero", "sistema_valor_icms_st", "tem_detalhe_item"])
-    else:
-        rotina_agg = rotina.groupby("nf_numero", as_index=False).agg(sistema_valor_icms_st=("valor_icms", "sum"))
-        rotina_agg["tem_detalhe_item"] = True
+    nfs_1096 = set(rotina["nf_numero"]) if not rotina.empty else set()
+    sefaz_agg["encontrada_1096"] = sefaz_agg["nf_numero"].isin(nfs_1096)
 
-    comp = sefaz_agg.merge(rotina_agg, on="nf_numero", how="left")
-    # pd.to_numeric antes do fillna: achado em produção (12/08/2026, erro real do usuário: "TypeError" no
-    # .sum() da tela) — quando `rotina` está vazio (nenhum Relatório 1096 importado ainda pra esta
-    # competência, mas já tem lançamento da SEFAZ pra Receita 1023), `rotina_agg` é criado como
-    # `pd.DataFrame(columns=[...])`, que tem dtype "object" em todas as colunas (DataFrame vazio sem dado
-    # nenhum pra inferir tipo). O merge propaga esse dtype "object" pra `sistema_valor_icms_st` mesmo depois
-    # do fillna(0.0) — e uma Series "object" com valores numéricos vira um TypeError em .sum() dependendo da
-    # versão do pandas/numpy. Mesmo tratamento já usado em `comparar_1076_sefaz` pra este mesmo tipo de
-    # merge.
-    comp["sefaz_calculado"] = pd.to_numeric(comp["sefaz_calculado"], errors="coerce").fillna(0.0)
-    comp["sistema_valor_icms_st"] = pd.to_numeric(comp["sistema_valor_icms_st"], errors="coerce").fillna(0.0)
-    comp["tem_detalhe_item"] = comp["tem_detalhe_item"].fillna(False).astype(bool)
-    comp["encontrada_1096"] = comp["nf_numero"].isin(
-        rotina["nf_numero"] if not rotina.empty else []
-    )
-    return comp.sort_values("nf_numero").reset_index(drop=True)[
-        ["nf_numero", "sefaz_calculado", "sistema_valor_icms_st", "encontrada_1096", "tem_detalhe_item"]
+    return sefaz_agg.sort_values("nf_numero").reset_index(drop=True)[
+        ["nf_numero", "sefaz_calculado", "encontrada_1096"]
     ]
 
 
 def listar_itens_1096_por_nf(session, competencia_id: int, nf_numero: str) -> pd.DataFrame:
-    """Detalhe de produtos de uma NF específica no Relatório 1096 — substitui completamente o uso da Rotina
-    1076 nesta aba (ver comentário acima). Devolve produto, quantidade, valor do produto e o ICMS
-    calculado item a item (alíquota e valor) — o Relatório 1096 não traz NCM."""
+    """Detalhe de produtos de uma NF específica no Relatório 1096 — pedido do usuário em 12/08/2026: "nas
+    que tiverem informar a listagem dos produtos abaixo, somente codigo e descrição" (sem quantidade, valor
+    ou ICMS — não é mais preciso bater valor com o Relatório 1096, só conferir presença da NF)."""
     rotina = carregar_relatorio_1096(session, competencia_id)
     if rotina.empty:
         return rotina
     itens = rotina[rotina["nf_numero"] == str(nf_numero)]
-    return itens[
-        ["produto_codigo", "produto_descricao", "quantidade", "valor_produto", "aliq_icms", "valor_icms"]
-    ].reset_index(drop=True)
+    return itens[["produto_codigo", "produto_descricao"]].drop_duplicates().reset_index(drop=True)
+
+
+# ==============================================================================================
+# Justificativa da aba Antecipado — pedido do usuário em 12/08/2026: "na aba que apresenta se foi
+# encontrata na 1096 informar um campo de justificativa, com a informação 'validado' ou 'Corrreção Sefaz'".
+#
+# NÃO reaproveita `icms_st_justificativas` (usada pelas abas Interestadual/Interno): uma mesma NF pode
+# aparecer nas DUAS fontes da SEFAZ com Receitas diferentes ao mesmo tempo — já documentado no módulo (ver
+# "Regra da Receita" acima): a NF 20354 tem lançamento tanto na Receita 1031 (R$ 471,27, conferida na aba
+# Interestadual) quanto na 1023 (R$ 111,26, conferida aqui). Se as duas abas gravassem justificativa na
+# mesma tabela por `nf_numero`, marcar "Validado" aqui sobrescreveria/colidiria com a justificativa que já
+# existe pra essa mesma NF na aba Interestadual. Por isso, tabela própria (`icms_antecipado_justificativas`,
+# sql/022_icms_antecipado_justificativas.sql), isolada — mesmo princípio de isolamento já usado no import
+# desta aba.
+# ==============================================================================================
+
+JUSTIFICATIVAS_ANTECIPADO = ["Validado", "Correção Sefaz"]
+
+COLS_JUSTIFICATIVA_ANTECIPADO = ["nf_numero", "justificativa", "observacao"]
+
+
+def carregar_justificativa_antecipado(session, competencia_id: int) -> pd.DataFrame:
+    rows = session.execute(text("""
+        select nf_numero, justificativa, observacao
+        from icms_antecipado_justificativas where competencia_id = :cid order by nf_numero
+    """), {"cid": competencia_id}).mappings().all()
+    return pd.DataFrame(rows, columns=COLS_JUSTIFICATIVA_ANTECIPADO)
+
+
+def salvar_justificativa_antecipado(session, competencia_id: int, df: pd.DataFrame, usuario_email: str = None) -> int:
+    """Upsert por (competencia_id, nf_numero) — mesmo padrão de `salvar_justificativas`: linha sem
+    justificativa NEM observação é apagada em vez de gravada vazia (permite "desmarcar"). Observação é
+    texto livre (pedido do usuário em 12/08/2026: "Ao lado da justificativa do antecipado, colocar
+    observação e deixe livre para o analista digitar o que achar necessario") — pode ser preenchida mesmo
+    sem justificativa selecionada, e vice-versa."""
+    n = 0
+    for _, row in df.iterrows():
+        justificativa = _texto_ou_none(row.get("justificativa"))
+        observacao = _texto_ou_none(row.get("observacao"))
+        if not justificativa and not observacao:
+            session.execute(text("""
+                delete from icms_antecipado_justificativas where competencia_id = :cid and nf_numero = :nf
+            """), {"cid": competencia_id, "nf": row["nf_numero"]})
+            continue
+        session.execute(text("""
+            insert into icms_antecipado_justificativas
+                (competencia_id, nf_numero, justificativa, observacao, atualizado_por_email, atualizado_em)
+            values (:cid, :nf, :just, :obs, :email, now())
+            on conflict (competencia_id, nf_numero) do update set
+                justificativa = excluded.justificativa, observacao = excluded.observacao,
+                atualizado_por_email = excluded.atualizado_por_email, atualizado_em = now()
+        """), {
+            "cid": competencia_id, "nf": row["nf_numero"], "just": justificativa, "obs": observacao,
+            "email": usuario_email,
+        })
+        n += 1
+    session.commit()
+    return n
 
 
 # ==============================================================================================
