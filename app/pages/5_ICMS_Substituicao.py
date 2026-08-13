@@ -21,6 +21,7 @@ from lib.icms_st import (
 from lib.formatacao import formatar_moeda, rotulo_empresa
 from sqlalchemy import text
 import pandas as pd
+import io
 
 st.set_page_config(page_title="ICMS Substituição", layout="wide")
 require_login()
@@ -531,6 +532,34 @@ with aba_credito_presumido:
                 "% Decreto", "Base ST", "VL ST RET", "VL ST Decreto", "Crédito Presumido",
             ]],
             use_container_width=True, hide_index=True, height=500,
+        )
+
+        # Exportação "Bloco E - SPED ICMS/IPI" — pedido do usuário em 13/08/2026: botão de exportação com
+        # NF/Data Entrada/VL ST RET/VL ST DECRETO, pra apoiar o lançamento do ajuste de Crédito Presumido no
+        # Bloco E do SPED ICMS/IPI (registro de ajuste da apuração). Só entram itens com % Decreto encontrado
+        # no de-para (vl_st_decreto calculado) — item pendente de revisão manual não tem VL ST DECRETO
+        # confiável pra exportar.
+        export_cp = credito.loc[credito["encontrado_depara"], ["nf_numero", "dt_entrada", "valor_icms_st", "vl_st_decreto"]].copy()
+        export_cp.columns = ["NF", "DATA ENTRADA", "VL ST RET", "VL ST DECRETO"]
+
+        n_excluidos_export = len(credito) - len(export_cp)
+        if n_excluidos_export:
+            st.caption(
+                f"⚠️ {n_excluidos_export} item(ns) pendente(s) de revisão manual (% Decreto não encontrado) "
+                f"ficam de fora da exportação abaixo."
+            )
+
+        buffer_cp = io.BytesIO()
+        with pd.ExcelWriter(buffer_cp, engine="openpyxl") as writer:
+            export_cp.to_excel(writer, sheet_name="Bloco E - SPED ICMS-IPI", index=False)
+
+        st.download_button(
+            "📤 Exportar Bloco E - SPED ICMS/IPI",
+            data=buffer_cp.getvalue(),
+            file_name=f"bloco_e_sped_icms_ipi_{mes:02d}_{ano}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            disabled=export_cp.empty,
+            key="btn_exportar_bloco_e_credito_presumido",
         )
 
 with st.expander("Ver itens importados (detalhe, sem agregação por NF)"):
