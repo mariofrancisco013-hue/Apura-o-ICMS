@@ -535,12 +535,13 @@ with aba_credito_presumido:
         )
 
         # Exportação "Bloco E - SPED ICMS/IPI" — pedido do usuário em 13/08/2026: botão de exportação com
-        # NF/Data Entrada/VL ST RET/VL ST DECRETO, pra apoiar o lançamento do ajuste de Crédito Presumido no
+        # NF/Código do Produto/VL ST RET/VL ST DECRETO (correção do usuário no mesmo dia: no lugar da Data
+        # de Entrada é o Código do Produto), pra apoiar o lançamento do ajuste de Crédito Presumido no
         # Bloco E do SPED ICMS/IPI (registro de ajuste da apuração). Só entram itens com % Decreto encontrado
         # no de-para (vl_st_decreto calculado) — item pendente de revisão manual não tem VL ST DECRETO
         # confiável pra exportar.
-        export_cp = credito.loc[credito["encontrado_depara"], ["nf_numero", "dt_entrada", "valor_icms_st", "vl_st_decreto"]].copy()
-        export_cp.columns = ["NF", "DATA ENTRADA", "VL ST RET", "VL ST DECRETO"]
+        export_cp = credito.loc[credito["encontrado_depara"], ["nf_numero", "produto_codigo", "valor_icms_st", "vl_st_decreto"]].copy()
+        export_cp.columns = ["NF", "CODIGO DO PRODUTO", "VL ST RET", "VL ST DECRETO"]
 
         n_excluidos_export = len(credito) - len(export_cp)
         if n_excluidos_export:
