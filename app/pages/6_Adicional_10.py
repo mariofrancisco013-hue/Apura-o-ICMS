@@ -9,7 +9,7 @@ from lib.db import get_session
 from lib.importacao import buscar_competencia, get_or_create_competencia
 from lib.icms_adicional10 import (
     parse_filtro_clientes, salvar_clientes_filtro, carregar_clientes_filtro, listar_clientes_conflitantes,
-    parse_nfes, salvar_nfes_por_competencia, carregar_nfes_itens,
+    parse_nfes, parse_relatorio_10, salvar_nfes_por_competencia, carregar_nfes_itens,
     carregar_faturamento, salvar_faturamento, parse_resumo_faturamento,
     calcular_adicional10, PCT_FATURAMENTO_LIMITE, PCT_BASE_ADICIONAL_1, PCT_BASE_ADICIONAL_4,
     ALIQ_ADICIONAL_1, ALIQ_ADICIONAL_4,
@@ -63,9 +63,11 @@ else:
 st.markdown("---")
 st.subheader("Importar planilha")
 st.caption(
-    "Envie a planilha inteira (abas **FILTRO** + **NFES** + **RESUMO**, mesmo arquivo que o analista já "
-    "mantém). O cadastro de clientes (FILTRO) é **global** — vale pra todas as competências, atualiza quem "
-    "já existe e não apaga ninguém. As NFs (NFES) são agrupadas automaticamente pela **Data de Emissão** de "
+    "Aceita dois formatos, detectados automaticamente: a **planilha consolidada** do analista (abas "
+    "**FILTRO** + **NFES** + **RESUMO**) ou o **export bruto do Winthor** (sheet \"Report\", sem "
+    "cabeçalho — ex: \"10 f3.xlsx\"), que alimenta só as NFs (nenhum cadastro de cliente vem nesse "
+    "formato). O cadastro de clientes (FILTRO) é **global** — vale pra todas as competências, atualiza "
+    "quem já existe e não apaga ninguém. As NFs são agrupadas automaticamente pela **Data de Emissão** de "
     "cada linha e gravadas na competência certa (criando a competência se ainda não existir) — um único "
     "arquivo com vários meses alimenta todos eles de uma vez, sem precisar trocar o Ano/Mês acima antes de "
     "importar. O Faturamento (aba RESUMO, se presente) só serve pra pré-preencher o campo abaixo — continua "
@@ -77,44 +79,68 @@ arq_planilha = st.file_uploader(
 )
 if st.button("📥 Importar planilha", key="btn_importar_adicional10", disabled=arq_planilha is None):
     try:
-        xl = pd.ExcelFile(arq_planilha)
+        # engine="calamine": mesmo motivo do resto do projeto — openpyxl quebra em exports reais do
+        # Winthor (achado em produção em 13/08/2026, ver app/lib/icms_adicional10.py).
+        xl = pd.ExcelFile(arq_planilha, engine="calamine")
         mensagens = []
 
-        if "FILTRO" in xl.sheet_names:
-            df_filtro = parse_filtro_clientes(arq_planilha)
-            n_clientes = salvar_clientes_filtro(session, df_filtro, usuario_email=usuario_atual()["email"])
-            mensagens.append(f"{n_clientes} cliente(s) no cadastro (aba FILTRO).")
-        else:
-            mensagens.append("Aba \"FILTRO\" não encontrada — cadastro de clientes não foi atualizado.")
+        if "FILTRO" in xl.sheet_names or "NFES" in xl.sheet_names:
+            # Planilha consolidada do analista.
+            if "FILTRO" in xl.sheet_names:
+                df_filtro = parse_filtro_clientes(arq_planilha)
+                n_clientes = salvar_clientes_filtro(
+                    session, df_filtro, usuario_email=usuario_atual()["email"]
+                )
+                mensagens.append(f"{n_clientes} cliente(s) no cadastro (aba FILTRO).")
+            else:
+                mensagens.append("Aba \"FILTRO\" não encontrada — cadastro de clientes não foi atualizado.")
 
-        if "NFES" in xl.sheet_names:
-            df_nfes = parse_nfes(arq_planilha)
+            if "NFES" in xl.sheet_names:
+                df_nfes = parse_nfes(arq_planilha)
+                resultado_import = salvar_nfes_por_competencia(
+                    session, empresa["cnpj"], df_nfes, get_or_create_competencia
+                )
+                if resultado_import:
+                    detalhe = ", ".join(
+                        f"{qtd} NF(s) em {comp}" for comp, qtd in sorted(resultado_import.items())
+                    )
+                    mensagens.append(f"NFs importadas: {detalhe}.")
+                else:
+                    mensagens.append("Nenhuma NF com Data de Emissão válida encontrada na aba NFES.")
+
+            if "RESUMO" in xl.sheet_names:
+                faturamento_map = parse_resumo_faturamento(arq_planilha)
+                n_faturamento = 0
+                for (f_ano, f_mes), valor in faturamento_map.items():
+                    cid_fat = get_or_create_competencia(
+                        session, empresa["cnpj"], f_ano, f_mes, modulo="icms_adicional_10"
+                    )
+                    if carregar_faturamento(session, cid_fat) is None:
+                        salvar_faturamento(session, cid_fat, valor)
+                        n_faturamento += 1
+                if n_faturamento:
+                    mensagens.append(
+                        f"Faturamento pré-preenchido em {n_faturamento} competência(s) (só onde ainda não "
+                        f"havia valor salvo — não sobrescreve edição manual já feita)."
+                    )
+        elif "Report" in xl.sheet_names:
+            # Export bruto do Winthor — só NFs, sem cadastro de clientes nem faturamento.
+            df_nfes = parse_relatorio_10(arq_planilha)
             resultado_import = salvar_nfes_por_competencia(
                 session, empresa["cnpj"], df_nfes, get_or_create_competencia
             )
             if resultado_import:
-                detalhe = ", ".join(f"{qtd} NF(s) em {comp}" for comp, qtd in sorted(resultado_import.items()))
-                mensagens.append(f"NFs importadas: {detalhe}.")
+                detalhe = ", ".join(
+                    f"{qtd} NF(s) em {comp}" for comp, qtd in sorted(resultado_import.items())
+                )
+                mensagens.append(f"NFs importadas (export bruto do Winthor): {detalhe}.")
             else:
-                mensagens.append("Nenhuma NF com Data de Emissão válida encontrada na aba NFES.")
+                mensagens.append("Nenhuma NF com Data de Emissão válida encontrada no arquivo.")
         else:
-            mensagens.append("Aba \"NFES\" não encontrada — nenhuma NF foi importada.")
-
-        if "RESUMO" in xl.sheet_names:
-            faturamento_map = parse_resumo_faturamento(arq_planilha)
-            n_faturamento = 0
-            for (f_ano, f_mes), valor in faturamento_map.items():
-                cid_fat = get_or_create_competencia(
-                    session, empresa["cnpj"], f_ano, f_mes, modulo="icms_adicional_10"
-                )
-                if carregar_faturamento(session, cid_fat) is None:
-                    salvar_faturamento(session, cid_fat, valor)
-                    n_faturamento += 1
-            if n_faturamento:
-                mensagens.append(
-                    f"Faturamento pré-preenchido em {n_faturamento} competência(s) (só onde ainda não "
-                    f"havia valor salvo — não sobrescreve edição manual já feita)."
-                )
+            mensagens.append(
+                "Não foi possível reconhecer o formato da planilha — esperado uma aba \"FILTRO\"/\"NFES\" "
+                "(planilha consolidada) ou uma aba \"Report\" (export bruto do Winthor)."
+            )
 
         st.success(" ".join(mensagens))
         st.rerun()

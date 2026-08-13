@@ -72,6 +72,22 @@ COLS_NFES_TABELA = [
     "uf", "ie", "vl_total", "obs",
 ]
 
+# Colunas posicionais do export BRUTO do Winthor (achado em 13/08/2026, arquivo real do usuário
+# "10 f3.xlsx" — sheet "Report", sem cabeçalho, 22 colunas). Layout diferente da aba "NFES" da planilha
+# consolidada do usuário (que já vem com cabeçalho e só 16 colunas, incluindo duas colunas CALCULADAS —
+# "Calcula"/"Competencia" — que não existem aqui): este é provavelmente o export original que o usuário
+# cola na aba NFES da planilha consolidada antes de montar as fórmulas. As 12 primeiras colunas batem
+# exatas com o início da aba NFES (N Trans .. IE); dali em diante o layout diverge — colunas 12/13/15/16/
+# 17/18/19 sempre vazias ou constantes na amostra real (baixo valor informativo, não gravadas), coluna 14 é
+# o Valor Total (confirmado pela faixa de valores — bate com o padrão de VL_TOTAL da aba NFES), coluna 20 é
+# um código de forma de pagamento (D/PIX/PBC1-4/PBD1-2 na amostra — não usado no cálculo do Adicional 10%,
+# não gravado) e coluna 21 é OBS (texto livre, ex: "C - DESISTIU DA COMPRA BALCAO").
+COLS_RELATORIO10_RAW = [
+    "n_trans", "nfe", "serie", "tv", "filial", "emissao", "cnpj", "rca", "cod_cliente", "cliente_nome",
+    "uf", "ie", "_col12", "_col13", "vl_total", "_col15", "_col16", "_col17", "_col18", "_col19",
+    "forma_pagamento", "obs",
+]
+
 
 def _texto_ou_none(valor):
     if valor is None:
@@ -101,7 +117,11 @@ def parse_filtro_clientes(arquivo_ou_planilha) -> pd.DataFrame:
     """Aceita tanto um arquivo com uma aba "FILTRO" (a planilha inteira do usuário) quanto um arquivo cuja
     primeira aba já seja o cadastro — procura a aba "FILTRO" pelo nome; se não achar, usa a primeira.
     Colunas esperadas (com cabeçalho): COD. C | CALCULA | CLIENTE."""
-    xl = pd.ExcelFile(arquivo_ou_planilha)
+    # engine="calamine": mesmo motivo do resto do projeto (ver app/lib/importacao.py) — os exports do
+    # Winthor têm um XML fora do padrão que quebra o openpyxl (achado em produção em 13/08/2026: TypeError
+    # "BookView.__init__() got an unexpected keyword argument 'WindowWidth'" ao importar um arquivo .xlsx
+    # real do usuário — o mesmo problema já visto antes com outros arquivos .xls/.xlsx do Winthor).
+    xl = pd.ExcelFile(arquivo_ou_planilha, engine="calamine")
     sheet = "FILTRO" if "FILTRO" in xl.sheet_names else xl.sheet_names[0]
     df = xl.parse(sheet)
     if df.shape[1] < 3:
@@ -172,7 +192,11 @@ def parse_nfes(arquivo_ou_planilha) -> pd.DataFrame:
     (Calcula/Competência) são ignoradas (ver docstring do módulo, "Por que recalcular"). Linhas sem data de
     Emissão são descartadas (linhas em branco/rodapé de totais — achado em dado real: a última linha da
     amostra era uma linha de total, sem Emissão)."""
-    xl = pd.ExcelFile(arquivo_ou_planilha)
+    # engine="calamine": mesmo motivo do resto do projeto (ver app/lib/importacao.py) — os exports do
+    # Winthor têm um XML fora do padrão que quebra o openpyxl (achado em produção em 13/08/2026: TypeError
+    # "BookView.__init__() got an unexpected keyword argument 'WindowWidth'" ao importar um arquivo .xlsx
+    # real do usuário — o mesmo problema já visto antes com outros arquivos .xls/.xlsx do Winthor).
+    xl = pd.ExcelFile(arquivo_ou_planilha, engine="calamine")
     sheet = "NFES" if "NFES" in xl.sheet_names else xl.sheet_names[0]
     df = xl.parse(sheet)
     if df.shape[1] < 15:
@@ -199,6 +223,43 @@ def parse_nfes(arquivo_ou_planilha) -> pd.DataFrame:
     out["ie"] = df["ie"].apply(_texto_ou_none)
     out["vl_total"] = pd.to_numeric(df["vl_total"], errors="coerce")
     out["obs"] = df["obs"].apply(_texto_ou_none) if "obs" in df.columns else None
+
+    out = out[out["emissao"].notna()].reset_index(drop=True)
+    return out[COLS_NFES_TABELA]
+
+
+def parse_relatorio_10(arquivo) -> pd.DataFrame:
+    """Lê o export BRUTO do Winthor (.xls/.xlsx, sheet "Report", sem cabeçalho, 22 colunas — achado em
+    13/08/2026, arquivo real do usuário "10 f3.xlsx") — layout diferente da aba "NFES" da planilha
+    consolidada (ver COLS_RELATORIO10_RAW). É provavelmente o export original que o usuário cola na aba
+    NFES antes de montar as fórmulas da planilha consolidada — esta função permite importar esse export
+    bruto DIRETO, sem precisar passar pela planilha consolidada inteira. Devolve no mesmo formato de
+    `parse_nfes` (COLS_NFES_TABELA), pra poder ser gravado com `salvar_nfes_por_competencia` do jeito de
+    sempre."""
+    df = pd.read_excel(arquivo, sheet_name="Report", header=None, engine="calamine")
+    if len(df.columns) != len(COLS_RELATORIO10_RAW):
+        raise ValueError(
+            f"Arquivo tem {len(df.columns)} coluna(s) — esperado {len(COLS_RELATORIO10_RAW)} (export "
+            f"bruto do Winthor, sheet \"Report\"). Se for a planilha consolidada (com abas FILTRO/NFES/"
+            f"RESUMO), envie ela inteira em vez de só esta aba."
+        )
+    df.columns = COLS_RELATORIO10_RAW
+
+    out = pd.DataFrame()
+    out["n_trans"] = df["n_trans"].apply(_texto_ou_none)
+    out["nfe"] = df["nfe"].apply(_texto_ou_none)
+    out["serie"] = df["serie"].apply(_texto_ou_none)
+    out["tv"] = df["tv"].apply(_texto_ou_none)
+    out["filial"] = df["filial"].apply(_texto_ou_none)
+    out["emissao"] = pd.to_datetime(df["emissao"], errors="coerce").dt.date
+    out["cnpj"] = df["cnpj"].apply(_texto_ou_none)
+    out["rca"] = df["rca"].apply(_texto_ou_none)
+    out["cod_cliente"] = df["cod_cliente"].apply(_cod_cliente_ou_none)
+    out["cliente_nome"] = df["cliente_nome"].apply(_texto_ou_none)
+    out["uf"] = df["uf"].apply(_texto_ou_none)
+    out["ie"] = df["ie"].apply(_texto_ou_none)
+    out["vl_total"] = pd.to_numeric(df["vl_total"], errors="coerce")
+    out["obs"] = df["obs"].apply(_texto_ou_none)
 
     out = out[out["emissao"].notna()].reset_index(drop=True)
     return out[COLS_NFES_TABELA]
@@ -271,7 +332,11 @@ def parse_resumo_faturamento(arquivo_ou_planilha) -> dict:
     """Lê a aba "RESUMO" da planilha do usuário (se existir) e devolve um dict {(ano, mes): faturamento} —
     usado só pra PRÉ-PREENCHER o campo de Faturamento na tela quando o usuário importa a planilha inteira
     (o valor continua editável/sobrescrevível depois). Não falha se a aba não existir — devolve {}."""
-    xl = pd.ExcelFile(arquivo_ou_planilha)
+    # engine="calamine": mesmo motivo do resto do projeto (ver app/lib/importacao.py) — os exports do
+    # Winthor têm um XML fora do padrão que quebra o openpyxl (achado em produção em 13/08/2026: TypeError
+    # "BookView.__init__() got an unexpected keyword argument 'WindowWidth'" ao importar um arquivo .xlsx
+    # real do usuário — o mesmo problema já visto antes com outros arquivos .xls/.xlsx do Winthor).
+    xl = pd.ExcelFile(arquivo_ou_planilha, engine="calamine")
     if "RESUMO" not in xl.sheet_names:
         return {}
     df = xl.parse("RESUMO", header=1)
