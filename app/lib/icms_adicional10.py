@@ -381,7 +381,16 @@ def calcular_adicional10(session, competencia_id: int, faturamento) -> dict:
     mapa_calcula = clientes_dedup.set_index("cod_cliente")["calcula_sim"]
 
     detalhamento = nfes.copy()
-    detalhamento["conta"] = detalhamento["cod_cliente"].map(mapa_calcula).fillna(False)
+    # .astype(bool) é necessário mesmo depois do fillna(False): quando NENHUM cod_cliente das NFs bate com
+    # o cadastro (ex: cadastro ainda vazio — caso real do import via "Report" bruto do Winthor, que não
+    # traz FILTRO nenhum), o .map() devolve uma coluna inteira de NaN (float64) e o fillna(False) resultante
+    # vira dtype "object" (Python bool solto, não numpy bool) em vez de dtype bool de verdade. Sem o
+    # .astype(bool), o "~detalhamento['conta']" mais adiante (nesta função e na página) faz um NOT bit a bit
+    # em vez de NOT lógico — ~False vira -1 (não True) — e o .loc[...] tenta usar esses -1 como RÓTULO de
+    # linha em vez de máscara booleana, estourando KeyError "None of [...] are in the [index]" (achado em
+    # produção em 13/08/2026, ao calcular uma competência cujas NFs vieram só do export bruto, sem cadastro
+    # de clientes ainda importado).
+    detalhamento["conta"] = detalhamento["cod_cliente"].map(mapa_calcula).fillna(False).astype(bool)
 
     vendas = float(detalhamento.loc[detalhamento["conta"], "vl_total"].fillna(0).sum())
     faturamento = float(faturamento) if faturamento is not None else 0.0

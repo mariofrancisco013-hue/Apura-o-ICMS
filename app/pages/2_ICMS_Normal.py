@@ -21,6 +21,7 @@ from lib.ncm_tributado import (
 from lib.cfops_sem_validacao import (
     listar_cfops_sem_validacao, salvar_cfops_sem_validacao, cfops_excluidos_validacao,
 )
+from lib.lancamentos_manuais import excluir_lancamentos_removidos
 from lib.importar_1024 import parse_rotina_1024
 from lib.importar_1025 import parse_rotina_1025
 from lib.conferencia_detalhada_1024 import comparar_relatorio_com_sistema
@@ -600,22 +601,70 @@ with aba_ajustes:
         "ajuste se repetir todo mês, é um sinal de que vale a pena corrigir na origem (Winthor) para não "
         "precisar mais lançar manualmente aqui."
     )
-    lancamentos = session.execute(text("""
-        select id, tipo, cfop_relacionado, descricao, valor from lancamentos_manuais
-        where competencia_id = :cid order by tipo, id
-    """), {"cid": cid}).mappings().all()
+    lancamentos_df = pd.DataFrame(
+        session.execute(text("""
+            select id, tipo, cfop_relacionado, descricao, valor from lancamentos_manuais
+            where competencia_id = :cid order by tipo, id
+        """), {"cid": cid}).mappings().all(),
+        columns=["id", "tipo", "cfop_relacionado", "descricao", "valor"],
+    )
+
+    _config_lancamento = {
+        "id": st.column_config.NumberColumn("ID", disabled=True),
+        "tipo": st.column_config.TextColumn("Tipo", disabled=True),
+        "cfop_relacionado": st.column_config.NumberColumn("CFOP", disabled=True),
+        "descricao": st.column_config.TextColumn("Descrição", disabled=True, width="large"),
+        "valor": st.column_config.NumberColumn("Valor (R$)", disabled=True, format="%.2f"),
+    }
+    _ordem_lancamento = ["tipo", "descricao", "cfop_relacionado", "valor", "id"]
 
     col_deb, col_cred = st.columns(2)
     with col_deb:
         st.subheader("Débitos")
-        deb = [dict(l, valor=formatar_moeda(l["valor"])) for l in lancamentos
-               if l["tipo"] in ("difal_debito", "ajuste_cfop_debito")]
-        st.dataframe(deb, use_container_width=True)
+        deb_df = lancamentos_df[
+            lancamentos_df["tipo"].isin(["difal_debito", "ajuste_cfop_debito"])
+        ].reset_index(drop=True)
+        deb_editado = st.data_editor(
+            deb_df, use_container_width=True, num_rows="dynamic", key="editor_lancamentos_debito",
+            column_config=_config_lancamento, column_order=_ordem_lancamento,
+        )
     with col_cred:
         st.subheader("Créditos")
-        cred = [dict(l, valor=formatar_moeda(l["valor"])) for l in lancamentos
-                if l["tipo"] in ("ciap_credito", "dae_antecipado_credito", "ajuste_cfop_credito")]
-        st.dataframe(cred, use_container_width=True)
+        cred_df = lancamentos_df[
+            lancamentos_df["tipo"].isin(["ciap_credito", "dae_antecipado_credito", "ajuste_cfop_credito"])
+        ].reset_index(drop=True)
+        cred_editado = st.data_editor(
+            cred_df, use_container_width=True, num_rows="dynamic", key="editor_lancamentos_credito",
+            column_config=_config_lancamento, column_order=_ordem_lancamento,
+        )
+
+    outros_df = lancamentos_df[lancamentos_df["tipo"] == "outro"].reset_index(drop=True)
+    outros_editado = outros_df
+    if not outros_df.empty:
+        st.caption(
+            f"⚠️ {len(outros_df)} lançamento(s) do tipo \"outro\" — **não entram em nenhuma linha do "
+            "cálculo** (só débito/crédito/ajuste CFOP entram). Revise se algum deveria ter sido lançado "
+            "com outro tipo, ou exclua abaixo."
+        )
+        outros_editado = st.data_editor(
+            outros_df, use_container_width=True, num_rows="dynamic", key="editor_lancamentos_outros",
+            column_config=_config_lancamento, column_order=_ordem_lancamento,
+        )
+
+    st.caption(
+        "Para excluir um lançamento: selecione a linha na grade (ícone à esquerda) e clique no ícone de "
+        "lixeira, depois em \"Salvar exclusões\" abaixo. Linha nova digitada direto na grade é ignorada — "
+        "para incluir, use o formulário \"Adicionar lançamento\" mais abaixo."
+    )
+    if st.button("🗑️ Salvar exclusões"):
+        df_editado_total = pd.concat([deb_editado, cred_editado, outros_editado], ignore_index=True)
+        n_removidos = excluir_lancamentos_removidos(session, lancamentos_df, df_editado_total)
+        if n_removidos:
+            st.success(f"{n_removidos} lançamento(s) excluído(s). Recalcule a apuração (aba Apuração) para "
+                       "os valores refletirem a exclusão.")
+        else:
+            st.info("Nenhuma linha foi removida da grade — nada para excluir.")
+        st.rerun()
 
     with st.form("novo_lancamento", clear_on_submit=True):
         st.markdown("**Adicionar lançamento**")
