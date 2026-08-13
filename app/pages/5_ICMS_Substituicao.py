@@ -15,6 +15,8 @@ from lib.icms_st import (
     listar_1023_antecipado, listar_itens_1096_por_nf,
     parse_relatorio_1096, salvar_relatorio_1096, carregar_relatorio_1096,
     JUSTIFICATIVAS_ANTECIPADO, carregar_justificativa_antecipado, salvar_justificativa_antecipado,
+    parse_rotina_1076_analitico, salvar_credito_presumido_1076, carregar_credito_presumido_1076,
+    calcular_credito_presumido,
 )
 from lib.formatacao import formatar_moeda, rotulo_empresa
 from sqlalchemy import text
@@ -81,7 +83,7 @@ else:
 st.markdown("---")
 st.subheader("Importar relatórios")
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.markdown("**1076 Sintético**")
     st.caption(
@@ -132,6 +134,28 @@ with c3:
         except ValueError as e:
             st.error(str(e))
 
+with c4:
+    st.markdown("**1076 Analítico**")
+    st.caption(
+        "Item a item, com fornecedor (20 colunas) — pedido do usuário em 12/08/2026: \"1076 analítico "
+        "somente do que entrou no mês apurado\". Grava numa tabela separada, usada **só** pela aba "
+        "**Crédito Presumido** — reimportar aqui nunca afeta as outras abas."
+    )
+    arq_1076_analitico = st.file_uploader(
+        "Arquivo da Rotina 1076 (Analítico)", type=["xls", "xlsx"], key="upload_1076_analitico"
+    )
+    if st.button(
+        "📥 Importar 1076 Analítico", key="btn_importar_1076_analitico", disabled=arq_1076_analitico is None
+    ):
+        try:
+            _garantir_competencia()
+            df = parse_rotina_1076_analitico(arq_1076_analitico)
+            n = salvar_credito_presumido_1076(session, cid, df)
+            st.success(f"{n} item(ns) importado(s) da Rotina 1076 (Analítico).")
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+
 with st.expander("Cadastro de fornecedores (Optante do Simples) — opcional, só informativo"):
     st.caption(
         "Cadastro GLOBAL (não é por competência) de CNPJ → Razão Social → Optante do Simples Nacional, "
@@ -161,8 +185,11 @@ if cid is None:
 
 st.markdown("---")
 
-aba_interestadual, aba_interno, aba_antecipado = st.tabs(
-    ["🌎 Interestadual (fora do Ceará)", "🏠 Interno (Ceará)", "🧾 Antecipado (Receita 1023)"]
+aba_interestadual, aba_interno, aba_antecipado, aba_credito_presumido = st.tabs(
+    [
+        "🌎 Interestadual (fora do Ceará)", "🏠 Interno (Ceará)", "🧾 Antecipado (Receita 1023)",
+        "💰 Crédito Presumido",
+    ]
 )
 
 # ============================================================================================
@@ -445,9 +472,73 @@ with aba_antecipado:
             )
             st.caption(f"{len(itens_nf)} produto(s) desta NF no Relatório 1096.")
 
+# ============================================================================================
+with aba_credito_presumido:
+    st.subheader("Crédito Presumido (Subvenção) — 1076 Analítico do mês apurado × tabela de-para")
+    st.caption(
+        "Pedido do usuário em 12/08/2026: calcula o Crédito Presumido a partir do **1076 Analítico** "
+        "(campo próprio lá em cima, em \"Importar relatórios\"), considerando só os itens cuja **Data de "
+        "Entrada** cai dentro do mês/ano apurado nesta competência. A alíquota reduzida (% RET, já vem da "
+        "1076) é comparada contra a tabela de-para (% DECRETO); quando há mais de uma resposta possível "
+        "pro mesmo % RET, o desempate usa a UF de origem do item (confirmado com o usuário: Sul/Sudeste "
+        "exceto ES = 7,25%, Norte/Nordeste/Centro-Oeste e ES = 9,42% — só acontece pra % RET = 5,12%). "
+        "Fórmula (conferida célula a célula contra a planilha real do usuário): se % RET = 20%, o VL ST "
+        "DECRETO repete o VL ST RET (sem benefício); senão, VL ST DECRETO = BASE ST × % DECRETO. O "
+        "**Crédito Presumido (Benefício)** é a diferença: VL ST DECRETO − VL ST RET."
+    )
+
+    credito = calcular_credito_presumido(session, cid)
+    if credito.empty:
+        st.info(
+            "Nenhum item do 1076 Analítico com Data de Entrada dentro desta competência — importe o "
+            "arquivo no campo \"1076 Analítico\" acima."
+        )
+    else:
+        n_pendentes_cp = int((~credito["encontrado_depara"]).sum())
+        total_beneficio = credito["beneficio"].fillna(0).sum()
+
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("Itens no período", len(credito))
+        mc2.metric("⚠️ Sem % Decreto no de-para", n_pendentes_cp)
+        mc3.metric("💰 Total Crédito Presumido", formatar_moeda(total_beneficio))
+
+        if n_pendentes_cp:
+            st.warning(
+                f"{n_pendentes_cp} item(ns) com % RET não encontrado na tabela de-para (ou, no caso de "
+                f"5,12%, com UF de origem fora das regiões conhecidas) — não têm Crédito Presumido "
+                f"calculado automaticamente e precisam de revisão manual (linhas destacadas abaixo)."
+            )
+
+        tabela_cp = credito.copy()
+        tabela_cp["base_st_final_fmt"] = tabela_cp["base_st_final"].apply(_fmt)
+        tabela_cp["valor_icms_st_fmt"] = tabela_cp["valor_icms_st"].apply(_fmt)
+        tabela_cp["vl_st_decreto_fmt"] = tabela_cp["vl_st_decreto"].apply(_fmt)
+        tabela_cp["beneficio_fmt"] = tabela_cp["beneficio"].apply(_fmt)
+        tabela_cp["aliq_st_fmt"] = tabela_cp["aliq_st"].apply(lambda v: f"{v:.2f}%" if pd.notna(v) else "—")
+        tabela_cp["aliq_decreto_fmt"] = tabela_cp["aliq_decreto"].apply(
+            lambda v: f"{v:.2f}%" if pd.notna(v) else "⚠️ não encontrado"
+        )
+
+        st.dataframe(
+            tabela_cp.rename(columns={
+                "nf_numero": "NF", "dt_entrada": "Data Entrada", "produto_codigo": "Cód. Produto",
+                "produto_descricao": "Produto", "uf": "UF Origem", "fornecedor_nome": "Fornecedor",
+                "aliq_st_fmt": "% RET", "aliq_decreto_fmt": "% Decreto", "base_st_final_fmt": "Base ST",
+                "valor_icms_st_fmt": "VL ST RET", "vl_st_decreto_fmt": "VL ST Decreto",
+                "beneficio_fmt": "Crédito Presumido",
+            })[[
+                "NF", "Data Entrada", "Cód. Produto", "Produto", "UF Origem", "Fornecedor", "% RET",
+                "% Decreto", "Base ST", "VL ST RET", "VL ST Decreto", "Crédito Presumido",
+            ]],
+            use_container_width=True, hide_index=True, height=500,
+        )
+
 with st.expander("Ver itens importados (detalhe, sem agregação por NF)"):
-    aba_1076, aba_1096, aba_sefaz = st.tabs(
-        ["Rotina 1076 Sintético (itens)", "Relatório 1096 (Antecipado)", "Lançamentos da SEFAZ"]
+    aba_1076, aba_1096, aba_sefaz, aba_1076_analitico = st.tabs(
+        [
+            "Rotina 1076 Sintético (itens)", "Relatório 1096 (Antecipado)", "Lançamentos da SEFAZ",
+            "1076 Analítico (Crédito Presumido)",
+        ]
     )
     with aba_1076:
         df_1076 = carregar_rotina_1076(session, cid)
@@ -467,3 +558,9 @@ with st.expander("Ver itens importados (detalhe, sem agregação por NF)"):
             st.caption("Nada importado ainda.")
         else:
             st.dataframe(df_sefaz, use_container_width=True, height=400, hide_index=True)
+    with aba_1076_analitico:
+        df_1076_analitico = carregar_credito_presumido_1076(session, cid)
+        if df_1076_analitico.empty:
+            st.caption("Nada importado ainda (campo \"1076 Analítico\" acima).")
+        else:
+            st.dataframe(df_1076_analitico, use_container_width=True, height=400, hide_index=True)

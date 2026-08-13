@@ -110,6 +110,22 @@ COLS_1076_TABELA = [
     "fornecedor_codigo", "fornecedor_nome", "fornecedor_cnpj",
 ]
 
+# Colunas posicionais do export ANALÍTICO da Rotina 1076 (achado em 12/08/2026, arquivo real do usuário
+# "1076 filial 3 analítico.xlsx" — mesma sheet "Report", sem cabeçalho, 20 colunas). Item a item (uma linha
+# por item, igual o layout "item a item"), mas com fornecedor código+nome+CNPJ juntos na mesma linha (igual
+# o layout "resumido por NF"). Usado só pela aba **Crédito Presumido** (pedido do usuário em 12/08/2026:
+# "1076 analítico somente do que entrou no mês apurado") — já tinha sido usado antes pra aba Antecipado e
+# foi descontinuado dali quando ela passou a usar o Relatório 1096 (ver claude/metodologia-icms-st.md no
+# projeto); reaproveitado aqui porque é exatamente a fonte que a planilha "CALCULO SUBV" do usuário usa
+# (conferido campo a campo contra a NF 64185 real — ver salvar_credito_presumido_1076/comentário do módulo).
+# Colunas c9 ("valor_produto_bruto" = valor_produto + icms_proprio_base, conferido por soma exata), c14 e
+# c19 têm baixo valor informativo (c14 quase sempre 0) — não são gravadas.
+COLS_1076_ANALITICO_RAW = [
+    "dt_entrada", "dt_emissao", "dt_selo", "nf_numero", "fornecedor", "fornecedor_cnpj", "produto",
+    "ncm", "uf", "_col9", "valor_produto", "icms_proprio_base", "aliq_icms_proprio", "icms_proprio",
+    "_col14", "aliq_st", "aliq_cheia", "base_st_final", "valor_icms_st", "_col19",
+]
+
 # Colunas do CSV de lançamentos da SEFAZ (cabeçalho real, separador ";", campos entre aspas) -> nome interno.
 COLS_SEFAZ_MAP = {
     "CT-e": "cte", "Emitente": "emitente", "Nota Fiscal": "nf_numero",
@@ -248,6 +264,56 @@ def _parse_1076_resumido(df: pd.DataFrame) -> pd.DataFrame:
     out["fornecedor_nome"] = fornecedor_split.apply(lambda par: par[1])
     out["fornecedor_cnpj"] = df["fornecedor_cnpj"]
     return out[COLS_1076_TABELA]
+
+
+def _parse_1076_analitico(df: pd.DataFrame) -> pd.DataFrame:
+    """Layout analítico (20 colunas) — uma linha por item de entrada (igual o item a item), com fornecedor
+    código+nome+CNPJ juntos na mesma linha (igual o resumido por NF). Usado só na aba Crédito Presumido."""
+    df = df.copy()
+    df.columns = COLS_1076_ANALITICO_RAW
+
+    fornecedor_split = df["fornecedor"].apply(_dividir_codigo_nome)
+    produto_split = df["produto"].apply(_dividir_codigo_nome)
+
+    out = pd.DataFrame({"nf_numero": df["nf_numero"].astype(str).str.strip()})
+    out["dt_entrada"] = pd.to_datetime(df["dt_entrada"], errors="coerce").dt.date
+    out["dt_emissao"] = pd.to_datetime(df["dt_emissao"], errors="coerce").dt.date
+    out["dt_selo"] = pd.to_datetime(df["dt_selo"], errors="coerce").dt.date
+    out["num_seq_ent"] = None
+    out["produto_codigo"] = produto_split.apply(lambda par: par[0])
+    out["produto_descricao"] = produto_split.apply(lambda par: par[1])
+    out["ncm"] = df["ncm"].astype(str)
+    out["uf"] = df["uf"]
+    out["valor_produto"] = pd.to_numeric(df["valor_produto"], errors="coerce").fillna(0).astype(float)
+    out["icms_proprio"] = pd.to_numeric(df["icms_proprio"], errors="coerce").fillna(0).astype(float)
+    out["base_st"] = pd.to_numeric(df["icms_proprio_base"], errors="coerce").fillna(0).astype(float)
+    out["col13"] = pd.to_numeric(df["aliq_icms_proprio"], errors="coerce").fillna(0).astype(float)
+    out["aliq_st"] = pd.to_numeric(df["aliq_st"], errors="coerce").fillna(0).astype(float)
+    out["aliq_cheia"] = df["aliq_cheia"].astype(str)
+    out["base_st_final"] = pd.to_numeric(df["base_st_final"], errors="coerce").fillna(0).astype(float)
+    out["valor_icms_st"] = pd.to_numeric(df["valor_icms_st"], errors="coerce").fillna(0).astype(float)
+    out["formato_origem"] = "analitico"
+    out["fornecedor_codigo"] = fornecedor_split.apply(lambda par: par[0])
+    out["fornecedor_nome"] = fornecedor_split.apply(lambda par: par[1])
+    out["fornecedor_cnpj"] = df["fornecedor_cnpj"]
+    return out[COLS_1076_TABELA]
+
+
+def parse_rotina_1076_analitico(arquivo) -> pd.DataFrame:
+    """Lê o export ANALÍTICO da Rotina 1076 do Winthor (.xls/.xlsx, sheet "Report", sem cabeçalho, 20
+    colunas) — usado só pela aba Crédito Presumido (pedido do usuário em 12/08/2026: "1076 analítico
+    somente do que entrou no mês apurado"). Quem chama esta função deve gravar em
+    `credito_presumido_1076_itens` (ver `salvar_credito_presumido_1076`), NUNCA em `rotina_1076_itens` nem
+    em `relatorio_1096_itens`, pra não interferir nas outras abas."""
+    df = pd.read_excel(arquivo, sheet_name="Report", header=None, engine="calamine")
+    if len(df.columns) != len(COLS_1076_ANALITICO_RAW):
+        raise ValueError(
+            f"Arquivo da Rotina 1076 Analítico tem {len(df.columns)} colunas — esperado "
+            f"{len(COLS_1076_ANALITICO_RAW)}. Confira se é mesmo o export \"analítico\" (item a item, com "
+            f"fornecedor) — os layouts \"item a item\" (18 colunas) e \"resumido por NF\" (17 colunas) "
+            f"devem ser importados no campo \"1076 Sintético\", não aqui."
+        )
+    return _parse_1076_analitico(df)
 
 
 def _parse_1096(df: pd.DataFrame) -> pd.DataFrame:
@@ -413,6 +479,157 @@ def carregar_relatorio_1096(session, competencia_id: int) -> pd.DataFrame:
         from relatorio_1096_itens where competencia_id = :cid order by nf_numero, produto_codigo
     """), {"cid": competencia_id}).mappings().all()
     return pd.DataFrame(rows, columns=COLS_1096_TABELA)
+
+
+# ==============================================================================================
+# Aba Crédito Presumido (Subvenção) — pedido do usuário em 12/08/2026: "Agora temos a aba depois da
+# planilha e antecipado, o nome é Credito Presumido, Ela é calculada através da planilha, 1076 analítico
+# somente do que entrou no mês apurado, a colina aliq ST deve ser comparada com a tabela de e para, e nos
+# que tem mais de uma alíquota no de-para conferir o estado de origem para definir a correta, apos isso
+# definir o vlr sem st, para aqueles que estiverem com 20% o vl st ret dev se repetir para os que forem
+# diferente de 20% vai ser o % decreto encontrado vezes base ST".
+#
+# Fórmula confirmada célula a célula na planilha real do usuário ("subvenção.xlsx", aba "CALCULO SUBV",
+# fórmula mestra em S2:S36/S38:S76 — extraída direto do XML do .xlsx, não reconstruída por tentativa):
+#     VL ST DECRETO = SE(%RET = 20; VL ST RET; BASE ST x %DECRETO / 100)
+#     BENEFICIO (Crédito Presumido) = VL ST DECRETO − VL ST RET
+# onde %RET = aliq_st (já vem da 1076 Analítico) e %DECRETO vem do de-para (icms_credito_presumido_depara).
+# Achado importante: a única linha da planilha que parecia contradizer essa fórmula (NF 585551, %RET=10.96,
+# "VL ST DECRETO" = "VL ST RET") era uma SOBRESCRITA MANUAL isolada (célula sem fórmula, valor digitado à
+# mão) — não representa a regra geral. A fórmula mestra do Excel (compartilhada por dezenas de linhas) é
+# inequívoca: a condição é sobre %RET, não sobre %DECRETO.
+# ==============================================================================================
+
+# Regiões de origem usadas só pra desempate do único par ambíguo do de-para (aliq_ret = 5,12 -> 7,25% ou
+# 9,42%, conforme regiao_origem em icms_credito_presumido_depara) — confirmado com o usuário em 12/08/2026:
+# "o 7,25% é Regiões Sul e sudeste, exceto Estado do Espírito Santo e o 9,42 é Regiões Norte, Nordeste e
+# Centro-Oeste e Estado do Espírito Santo".
+UFS_SUL_SUDESTE_EXCETO_ES = {"PR", "SC", "RS", "SP", "RJ", "MG"}
+UFS_NORTE_NORDESTE_CO_ES = {
+    "AC", "AP", "AM", "PA", "RO", "RR", "TO",
+    "AL", "BA", "MA", "PB", "PE", "PI", "RN", "SE",
+    "DF", "GO", "MT", "MS",
+    "ES",
+}
+
+
+def _regiao_origem(uf: str) -> str:
+    uf = (uf or "").strip().upper()
+    if uf in UFS_SUL_SUDESTE_EXCETO_ES:
+        return "sul_sudeste"
+    if uf in UFS_NORTE_NORDESTE_CO_ES:
+        return "n_ne_co_es"
+    return None
+
+
+def salvar_credito_presumido_1076(session, competencia_id: int, df: pd.DataFrame) -> int:
+    """Mesmo padrão de salvar_relatorio_1096 (apagar+inserir por competência), tabela isolada
+    (`credito_presumido_1076_itens`) — reimportar aqui nunca afeta rotina_1076_itens (Interestadual/Interno)
+    nem relatorio_1096_itens (Antecipado)."""
+    session.execute(
+        text("delete from credito_presumido_1076_itens where competencia_id = :cid"), {"cid": competencia_id}
+    )
+    if not df.empty:
+        out = df.copy()
+        out.insert(0, "competencia_id", competencia_id)
+        out.to_sql(
+            "credito_presumido_1076_itens", session.bind, if_exists="append", index=False, method="multi",
+            chunksize=500,
+        )
+    session.commit()
+    return len(df)
+
+
+def carregar_credito_presumido_1076(session, competencia_id: int) -> pd.DataFrame:
+    rows = session.execute(text("""
+        select dt_entrada, dt_emissao, dt_selo, num_seq_ent, nf_numero, produto_codigo, produto_descricao,
+               ncm, uf, valor_produto, icms_proprio, base_st, col13, aliq_st, aliq_cheia, base_st_final,
+               valor_icms_st, formato_origem, fornecedor_codigo, fornecedor_nome, fornecedor_cnpj
+        from credito_presumido_1076_itens where competencia_id = :cid order by nf_numero, num_seq_ent
+    """), {"cid": competencia_id}).mappings().all()
+    return pd.DataFrame(rows, columns=COLS_1076_TABELA)
+
+
+def carregar_depara_credito_presumido(session) -> pd.DataFrame:
+    """Tabela de-para GLOBAL (não é por competência) — ver sql/023_credito_presumido.sql."""
+    rows = session.execute(text("""
+        select aliq_ret, aliq_decreto, regiao_origem from icms_credito_presumido_depara order by aliq_ret
+    """)).mappings().all()
+    return pd.DataFrame(rows, columns=["aliq_ret", "aliq_decreto", "regiao_origem"])
+
+
+def calcular_credito_presumido(session, competencia_id: int) -> pd.DataFrame:
+    """Núcleo da aba **Crédito Presumido**: filtra `credito_presumido_1076_itens` (import "1076 Analítico")
+    pelas entradas cujo `dt_entrada` cai dentro do mês/ano da competência apurada (pedido do usuário: "1076
+    analítico somente do que entrou no mês apurado" — confirmado com o usuário: "Data de Entrada
+    (Recomendado)"), cruza `aliq_st` contra o de-para (`icms_credito_presumido_depara`) pra achar
+    `aliq_decreto`, desempatando por região de origem (UF do item) quando há mais de uma resposta possível
+    pro mesmo `aliq_st`, e calcula:
+        vl_st_decreto = valor_icms_st,                        se aliq_st == 20
+                      = round(base_st_final * aliq_decreto / 100, 2), caso contrário
+        beneficio (Crédito Presumido) = vl_st_decreto - valor_icms_st
+
+    Itens cujo aliq_st não é encontrado no de-para NÃO são silenciosamente zerados (ao contrário do
+    IFERROR(...,"0") da planilha original) — ficam com aliq_decreto/vl_st_decreto/beneficio = None e
+    `encontrado_depara = False`, pra aparecerem destacados na tela como pendentes de revisão manual."""
+    itens = carregar_credito_presumido_1076(session, competencia_id)
+    if itens.empty:
+        return itens.assign(
+            aliq_decreto=pd.Series(dtype=float), vl_st_decreto=pd.Series(dtype=float),
+            beneficio=pd.Series(dtype=float), encontrado_depara=pd.Series(dtype=bool),
+        )
+
+    comp = session.execute(
+        text("select ano, mes from competencias where id = :cid"), {"cid": competencia_id}
+    ).mappings().first()
+    if comp is not None:
+        ano, mes = comp["ano"], comp["mes"]
+        dt_entrada = pd.to_datetime(itens["dt_entrada"], errors="coerce")
+        itens = itens[(dt_entrada.dt.year == ano) & (dt_entrada.dt.month == mes)].reset_index(drop=True)
+    if itens.empty:
+        return itens.assign(
+            aliq_decreto=pd.Series(dtype=float), vl_st_decreto=pd.Series(dtype=float),
+            beneficio=pd.Series(dtype=float), encontrado_depara=pd.Series(dtype=bool),
+        )
+
+    depara = carregar_depara_credito_presumido(session)
+    itens = itens.copy()
+    itens["aliq_st"] = pd.to_numeric(itens["aliq_st"], errors="coerce").round(2)
+    depara["aliq_ret"] = pd.to_numeric(depara["aliq_ret"], errors="coerce").round(2)
+    itens["_regiao_origem"] = itens["uf"].apply(_regiao_origem)
+
+    def _achar_decreto(row):
+        candidatos = depara[depara["aliq_ret"] == row["aliq_st"]]
+        if candidatos.empty:
+            return None
+        if len(candidatos) == 1:
+            return candidatos.iloc[0]["aliq_decreto"]
+        # mais de uma resposta possível pro mesmo aliq_st -> desempata pela região de origem do item
+        match = candidatos[candidatos["regiao_origem"] == row["_regiao_origem"]]
+        if not match.empty:
+            return match.iloc[0]["aliq_decreto"]
+        return None  # região de origem não bateu com nenhuma opção do de-para -> precisa revisão manual
+
+    itens["aliq_decreto"] = itens.apply(_achar_decreto, axis=1)
+    itens["encontrado_depara"] = itens["aliq_decreto"].notna()
+
+    def _vl_st_decreto(row):
+        if row["aliq_st"] == 20:
+            return row["valor_icms_st"]
+        if pd.isna(row["aliq_decreto"]):
+            return None
+        return round(row["base_st_final"] * row["aliq_decreto"] / 100, 2)
+
+    itens["vl_st_decreto"] = itens.apply(_vl_st_decreto, axis=1)
+    itens["beneficio"] = itens.apply(
+        lambda row: None if pd.isna(row["vl_st_decreto"]) else round(row["vl_st_decreto"] - row["valor_icms_st"], 2),
+        axis=1,
+    )
+    # itens com aliq_st=20 são "encontrados" por definição (não precisam do de-para pra ter vl_st_decreto
+    # confiável), mesmo que 20 não esteja cadastrado no de-para por algum motivo
+    itens.loc[itens["aliq_st"] == 20, "encontrado_depara"] = True
+
+    return itens.drop(columns=["_regiao_origem"])
 
 
 def carregar_sefaz_lancamentos(session, competencia_id: int) -> pd.DataFrame:
