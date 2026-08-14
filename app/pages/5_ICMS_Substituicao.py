@@ -10,8 +10,8 @@ from lib.icms_st import (
     parse_rotina_1076, parse_sefaz_lancamentos, salvar_rotina_1076, salvar_sefaz_lancamentos,
     carregar_rotina_1076, carregar_sefaz_lancamentos, comparar_1076_sefaz, listar_1076_interno,
     parse_cadastro_fornecedores_st, salvar_cadastro_fornecedores_st, listar_cadastro_fornecedores_st,
-    STATUS_NAO_LOCALIZADO, JUSTIFICATIVAS_TODAS,
-    carregar_justificativas, salvar_justificativas,
+    STATUS_NAO_LOCALIZADO, JUSTIFICATIVAS_TODAS, TOLERANCIA,
+    carregar_justificativas, salvar_justificativas, parse_planilha_dae, importar_numeros_dae,
     listar_1023_antecipado, listar_itens_1096_por_nf,
     parse_relatorio_1096, salvar_relatorio_1096, carregar_relatorio_1096,
     JUSTIFICATIVAS_ANTECIPADO, carregar_justificativa_antecipado, salvar_justificativa_antecipado,
@@ -248,6 +248,21 @@ with aba_interestadual:
         )
         comp_exibir = comp[comp["status"].isin(status_filtro)] if status_filtro else comp
 
+        # Pedido do usuário em 14/08/2026: "um filtro que permita identificar e apresentar os valores
+        # superiores ao sistema winthor" / "os valores do que esta maior na sefaz que o sistema" — filtro
+        # adicional (não substitui o de Situação acima, combina com ele) pra isolar só onde a SEFAZ cobra
+        # MAIS do que já está no sistema. Cobre "Divergente" com diferença positiva E "Pendente de entrada"
+        # (não escriturado — diferença sempre positiva ali, já que o sistema não tem nada lançado pra essa
+        # NF: sistema_valor_icms_st fica 0 na conta).
+        so_sefaz_maior = st.checkbox(
+            "🔺 Mostrar só onde a SEFAZ está maior que o sistema (inclui os não escriturados)",
+            key="filtro_sefaz_maior_interestadual",
+            help="Marca só as NFs com diferença positiva (SEFAZ − Sistema > R$ 0,05) — as que realmente "
+                 "precisam de ação (lançar no Winthor ou pagar DAE da diferença).",
+        )
+        if so_sefaz_maior:
+            comp_exibir = comp_exibir[comp_exibir["diferenca"] > TOLERANCIA]
+
         # pedido do usuário em 11/08/2026: "a justificativa e observação e excluída coloque para que
         # selecione diretamente aqui" — Justificativa, Observação e Excluída do cálculo agora se editam
         # direto nesta mesma tabela (antes ficavam em três grades de edição separadas, uma por status,
@@ -261,6 +276,7 @@ with aba_interestadual:
         tabela["diferenca_fmt"] = tabela["diferenca"].apply(_fmt)
         tabela["justificativa"] = tabela["justificativa"].apply(lambda v: v if pd.notna(v) else None)
         tabela["observacao"] = tabela["observacao"].apply(lambda v: v if pd.notna(v) else None)
+        tabela["numero_dae"] = tabela["numero_dae"].apply(lambda v: v if pd.notna(v) else None)
 
         tabela_editada = st.data_editor(
             tabela,
@@ -286,32 +302,86 @@ with aba_interestadual:
                         "divergência deste mês."
                     ),
                 ),
+                "numero_dae": st.column_config.TextColumn(
+                    "Nº DAE",
+                    help="Número do DAE usado pra pagar a diferença/pendência desta NF (pedido do usuário "
+                         "em 14/08/2026).",
+                ),
             },
             column_order=[
                 "nf_numero", "sefaz_calculado_fmt", "sistema_valor_icms_st_fmt", "diferenca_fmt", "status",
-                "justificativa", "observacao", "nao_entra_calculo",
+                "justificativa", "observacao", "numero_dae", "nao_entra_calculo",
             ],
         )
 
         st.caption(
             "**Pendente de entrada** — a SEFAZ está cobrando, mas a NF ainda não aparece na Rotina 1076: "
-            "falta lançar no Winthor. **Divergente** — a NF está nas duas fontes, mas o valor não bate "
-            "(diferença acima de R$ 0,05). **OK** — bate. **" + STATUS_NAO_LOCALIZADO + "** — aparece na "
-            "Rotina 1076 mas sem cobrança nesta Receita (pode ser de outra receita, ou lançamento da SEFAZ "
-            "ainda não disponibilizado no portal). **Excluída do cálculo** — marcada pelo analista como não "
-            "pertencente a esta competência; some das contagens de Pendente/Divergente/Não localizado nas "
-            "métricas acima, mas continua aparecendo na tabela pra rastreabilidade. Edite Justificativa, "
-            "Observação e Excluída do cálculo direto na tabela acima e clique em Salvar."
+            "falta lançar no Winthor (não escriturado). **Divergente** — a NF está nas duas fontes, mas o "
+            "valor não bate (diferença acima de R$ 0,05). **OK** — bate. **" + STATUS_NAO_LOCALIZADO +
+            "** — aparece na Rotina 1076 mas sem cobrança nesta Receita (pode ser de outra receita, ou "
+            "lançamento da SEFAZ ainda não disponibilizado no portal). **Excluída do cálculo** — marcada "
+            "pelo analista como não pertencente a esta competência; some das contagens de Pendente/"
+            "Divergente/Não localizado nas métricas acima, mas continua aparecendo na tabela pra "
+            "rastreabilidade. Edite Justificativa, Observação, Nº DAE e Excluída do cálculo direto na "
+            "tabela acima e clique em Salvar."
         )
 
-        if st.button("💾 Salvar justificativas e situações", key="btn_salvar_justificativas_unificado"):
-            n = salvar_justificativas(
-                session, cid,
-                tabela_editada[["nf_numero", "justificativa", "observacao", "nao_entra_calculo"]],
-                usuario_email=usuario_atual()["email"],
+        col_salvar, col_export = st.columns([1, 1])
+        with col_salvar:
+            if st.button("💾 Salvar justificativas e situações", key="btn_salvar_justificativas_unificado"):
+                n = salvar_justificativas(
+                    session, cid,
+                    tabela_editada[
+                        ["nf_numero", "justificativa", "observacao", "nao_entra_calculo", "numero_dae"]
+                    ],
+                    usuario_email=usuario_atual()["email"],
+                )
+                st.success(f"{n} linha(s) salva(s).")
+                st.rerun()
+        with col_export:
+            export_interestadual = tabela_editada.rename(columns={
+                "nf_numero": "NF", "sefaz_calculado": "SEFAZ (Calculado)",
+                "sistema_valor_icms_st": "Sistema (Rotina 1076)", "diferenca": "Diferença (SEFAZ - Sistema)",
+                "status": "Situação", "justificativa": "Justificativa", "observacao": "Observação",
+                "numero_dae": "Nº DAE", "nao_entra_calculo": "Excluída do cálculo?",
+            })[["NF", "SEFAZ (Calculado)", "Sistema (Rotina 1076)", "Diferença (SEFAZ - Sistema)", "Situação",
+                "Justificativa", "Observação", "Nº DAE", "Excluída do cálculo?"]]
+            buffer_interestadual = io.BytesIO()
+            with pd.ExcelWriter(buffer_interestadual, engine="openpyxl") as writer:
+                export_interestadual.to_excel(writer, sheet_name="Interestadual x SEFAZ", index=False)
+            st.download_button(
+                "📤 Exportar para Excel",
+                data=buffer_interestadual.getvalue(),
+                file_name=f"interestadual_sefaz_{mes:02d}_{ano}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                disabled=export_interestadual.empty,
+                key="btn_exportar_interestadual",
+                help="Exporta exatamente as linhas visíveis na tabela acima (com os filtros aplicados), "
+                     "incluindo o Nº DAE já preenchido.",
             )
-            st.success(f"{n} linha(s) salva(s).")
-            st.rerun()
+
+        with st.expander("📥 Reimportar planilha com números de DAE preenchidos"):
+            st.caption(
+                "Reaproveita a planilha exportada acima (ou uma equivalente, com colunas \"NF\" e "
+                "\"Nº DAE\") — atualiza só o número do DAE de cada NF, sem mexer em Justificativa/"
+                "Observação/Excluída do cálculo já salvos. Útil quando outra pessoa preenche os DAEs numa "
+                "cópia da planilha exportada e devolve pra você importar de volta."
+            )
+            arq_dae = st.file_uploader(
+                "Planilha com Nº DAE preenchido (.xls/.xlsx)", type=["xls", "xlsx"], key="upload_dae_interestadual"
+            )
+            if st.button(
+                "📥 Importar números de DAE", key="btn_importar_dae_interestadual", disabled=arq_dae is None
+            ):
+                try:
+                    df_dae = parse_planilha_dae(arq_dae)
+                    n_dae = importar_numeros_dae(
+                        session, cid, df_dae, usuario_email=usuario_atual()["email"]
+                    )
+                    st.success(f"{n_dae} número(s) de DAE importado(s)/atualizado(s).")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
 
 # ============================================================================================
 with aba_interno:

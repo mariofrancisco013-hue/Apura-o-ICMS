@@ -852,7 +852,7 @@ JUSTIFICATIVAS_NAO_LOCALIZADO = [
 
 JUSTIFICATIVAS_TODAS = list(dict.fromkeys(JUSTIFICATIVAS_DIVERGENTE + JUSTIFICATIVAS_NAO_LOCALIZADO))
 
-COLS_JUSTIFICATIVAS = ["nf_numero", "justificativa", "observacao", "nao_entra_calculo"]
+COLS_JUSTIFICATIVAS = ["nf_numero", "justificativa", "observacao", "nao_entra_calculo", "numero_dae"]
 
 
 def _texto_ou_none(valor):
@@ -881,7 +881,7 @@ def _bool_ou_false(valor):
 
 def carregar_justificativas(session, competencia_id: int) -> pd.DataFrame:
     rows = session.execute(text("""
-        select nf_numero, justificativa, observacao, nao_entra_calculo
+        select nf_numero, justificativa, observacao, nao_entra_calculo, numero_dae
         from icms_st_justificativas where competencia_id = :cid order by nf_numero
     """), {"cid": competencia_id}).mappings().all()
     df = pd.DataFrame(rows, columns=COLS_JUSTIFICATIVAS)
@@ -892,36 +892,98 @@ def carregar_justificativas(session, competencia_id: int) -> pd.DataFrame:
 def salvar_justificativas(session, competencia_id: int, df: pd.DataFrame, usuario_email: str = None) -> int:
     """Upsert por (competencia_id, nf_numero) — `df` só precisa ter as NFs que o analista editou nesta
     tela (não precisa ser a lista inteira; NFs de fora do `df` não são tocadas). Linha totalmente "vazia"
-    (sem justificativa, sem observação, e nao_entra_calculo desmarcado) é APAGADA em vez de gravada — tanto
-    pra não acumular lixo no banco quanto pra permitir desmarcar "não entra no cálculo" de volta (senão a
-    marcação antiga ficaria presa: um simples "pular" não distingue "nunca marcado" de "desmarcado agora").
+    (sem justificativa, sem observação, sem número de DAE, e nao_entra_calculo desmarcado) é APAGADA em vez
+    de gravada — tanto pra não acumular lixo no banco quanto pra permitir desmarcar "não entra no cálculo"
+    de volta (senão a marcação antiga ficaria presa: um simples "pular" não distingue "nunca marcado" de
+    "desmarcado agora").
     `nao_entra_calculo` (pedido do usuário em 11/08/2026, "colocar uma observação de situação, para
     informar se alguma nota é de outra competência E ela não deve ir para o cálculo"): quando True, a NF
     sai da contagem de Pendente/Divergente/Não localizado nos totais da tela (ver
-    app/pages/5_ICMS_Substituicao.py) — cobre qualquer status, não só divergência."""
+    app/pages/5_ICMS_Substituicao.py) — cobre qualquer status, não só divergência.
+    `numero_dae` (pedido do usuário em 14/08/2026: "Um campo para colocar o numero do DAE que esta aquela
+    nota") — número do DAE (Documento de Arrecadação Estadual) usado pra pagar a diferença/pendência
+    daquela NF; texto livre, sobrescreve como as demais colunas editáveis desta grade (limpar e salvar
+    remove o valor). Pra importar um LOTE de DAEs de uma planilha sem mexer nas outras colunas já salvas,
+    use `importar_numeros_dae` em vez desta função."""
     n = 0
     for _, row in df.iterrows():
         justificativa = _texto_ou_none(row.get("justificativa"))
         observacao = _texto_ou_none(row.get("observacao"))
         nao_entra_calculo = _bool_ou_false(row.get("nao_entra_calculo"))
-        if not justificativa and not observacao and not nao_entra_calculo:
+        numero_dae = _texto_ou_none(row.get("numero_dae"))
+        if not justificativa and not observacao and not nao_entra_calculo and not numero_dae:
             session.execute(text("""
                 delete from icms_st_justificativas where competencia_id = :cid and nf_numero = :nf
             """), {"cid": competencia_id, "nf": row["nf_numero"]})
             continue
         session.execute(text("""
             insert into icms_st_justificativas
-                (competencia_id, nf_numero, justificativa, observacao, nao_entra_calculo,
+                (competencia_id, nf_numero, justificativa, observacao, nao_entra_calculo, numero_dae,
                  atualizado_por_email, atualizado_em)
-            values (:cid, :nf, :just, :obs, :nao_entra, :email, now())
+            values (:cid, :nf, :just, :obs, :nao_entra, :dae, :email, now())
             on conflict (competencia_id, nf_numero) do update set
                 justificativa = excluded.justificativa, observacao = excluded.observacao,
-                nao_entra_calculo = excluded.nao_entra_calculo,
+                nao_entra_calculo = excluded.nao_entra_calculo, numero_dae = excluded.numero_dae,
                 atualizado_por_email = excluded.atualizado_por_email, atualizado_em = now()
         """), {
             "cid": competencia_id, "nf": row["nf_numero"], "just": justificativa, "obs": observacao,
-            "nao_entra": nao_entra_calculo, "email": usuario_email,
+            "nao_entra": nao_entra_calculo, "dae": numero_dae, "email": usuario_email,
         })
+        n += 1
+    session.commit()
+    return n
+
+
+def parse_planilha_dae(arquivo) -> pd.DataFrame:
+    """Lê uma planilha com pelo menos as colunas NF e Nº DAE (mesmo formato do botão "📤 Exportar para
+    Excel" da aba Interestadual, ou uma planilha simples equivalente montada por outra pessoa) — usada pra
+    reimportar números de DAE preenchidos fora da tela. Procura as colunas por NOME (não por posição — a
+    ordem pode variar), aceitando variações comuns de cabeçalho. Linhas sem NF ou sem DAE são ignoradas."""
+    # engine="calamine": mesmo motivo do resto do projeto — evita o crash do openpyxl em arquivos gerados
+    # fora do padrão (ver app/lib/icms_adicional10.py pro histórico desse bug).
+    xl = pd.ExcelFile(arquivo, engine="calamine")
+    df = xl.parse(xl.sheet_names[0])
+    colunas_norm = {str(c).strip().lower(): c for c in df.columns}
+
+    def _achar(*alvos):
+        for alvo in alvos:
+            if alvo in colunas_norm:
+                return colunas_norm[alvo]
+        return None
+
+    col_nf = _achar("nf", "nº nf", "numero nf", "número nf", "nf_numero")
+    col_dae = _achar("nº dae", "numero dae", "número dae", "dae", "numero_dae")
+    if col_nf is None or col_dae is None:
+        raise ValueError(
+            "Não encontrei as colunas de NF e Nº DAE na planilha — confira se ela tem uma coluna \"NF\" e "
+            "uma coluna \"Nº DAE\" (pode reaproveitar a planilha exportada pelo botão \"📤 Exportar para "
+            "Excel\" desta mesma tela)."
+        )
+    out = pd.DataFrame()
+    out["nf_numero"] = df[col_nf].apply(_texto_ou_none)
+    out["numero_dae"] = df[col_dae].apply(_texto_ou_none)
+    out = out[out["nf_numero"].notna() & out["numero_dae"].notna()].reset_index(drop=True)
+    return out
+
+
+def importar_numeros_dae(session, competencia_id: int, df: pd.DataFrame, usuario_email: str = None) -> int:
+    """Grava só o número do DAE (upsert por competencia_id+nf_numero) — diferente de `salvar_justificativas`
+    (que sobrescreve a linha inteira, certo pra edição interativa na grade), este NÃO mexe em justificativa/
+    observação/"não entra no cálculo" já salvos pra essa NF, pra não apagar edição feita antes só porque um
+    import em lote trouxe só NF+DAE."""
+    n = 0
+    for _, row in df.iterrows():
+        numero_dae = _texto_ou_none(row.get("numero_dae"))
+        if not numero_dae:
+            continue
+        session.execute(text("""
+            insert into icms_st_justificativas
+                (competencia_id, nf_numero, numero_dae, atualizado_por_email, atualizado_em)
+            values (:cid, :nf, :dae, :email, now())
+            on conflict (competencia_id, nf_numero) do update set
+                numero_dae = excluded.numero_dae, atualizado_por_email = excluded.atualizado_por_email,
+                atualizado_em = now()
+        """), {"cid": competencia_id, "nf": row["nf_numero"], "dae": numero_dae, "email": usuario_email})
         n += 1
     session.commit()
     return n
