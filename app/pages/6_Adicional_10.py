@@ -74,6 +74,28 @@ with aba_cadastro:
         "VENDAS) e quem é \"Exceção\" (não soma). Cliente que aparece numa NF mas não está cadastrado "
         "aqui também é tratado como **Exceção** (não conta) — mesmo comportamento da planilha original."
     )
+
+    with st.expander("📥 Importar cadastro de uma planilha (em vez de digitar linha por linha)"):
+        st.caption(
+            "Aceita **qualquer planilha simples** com 3 colunas, nesta ordem: **Código do Cliente**, "
+            "**Classificação** (\"Sim\" ou \"Exceção\") e **Cliente** (nome, opcional) — não precisa ser a "
+            "planilha consolidada inteira (FILTRO/NFES/RESUMO), nem ter esses nomes de aba. Atualiza quem "
+            "já existe no cadastro e adiciona quem é novo — não apaga ninguém que não vier no arquivo."
+        )
+        arq_cadastro = st.file_uploader(
+            "Planilha de cadastro (.xls/.xlsx)", type=["xls", "xlsx"], key="upload_cadastro_adicional10"
+        )
+        if st.button(
+            "📥 Importar cadastro", key="btn_importar_cadastro_adicional10", disabled=arq_cadastro is None
+        ):
+            try:
+                df_filtro_simples = parse_filtro_clientes(arq_cadastro)
+                n_cad = salvar_clientes_filtro(session, df_filtro_simples)
+                st.success(f"{n_cad} cliente(s) salvo(s) no cadastro.")
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
     clientes_atuais = carregar_clientes_filtro(session)
     st.caption(
         f"{len(clientes_atuais)} cliente(s) cadastrado(s). Use o ícone de busca 🔍 no canto superior da "
