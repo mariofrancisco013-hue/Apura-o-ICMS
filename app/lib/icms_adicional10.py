@@ -7,6 +7,11 @@ pra reverse-engenheirar a planilha de Crédito Presumido, ver app/lib/icms_st.py
 
 - **FILTRO** — cadastro de clientes (código -> "Sim"/"Exceção" -> se as NFs desse cliente contam ou não na
   base do Adicional 10%). Cadastro GLOBAL do usuário (2100+ clientes na amostra real), não muda por mês.
+  **Mudança de 14/08/2026** (pedido do usuário: "quero o cadastro somente do que for exceção, o que não
+  for exceção vai ser calculado"): a plataforma inverteu o padrão — não guarda mais os ~1700 "Sim" da
+  planilha, só as ~400 "Exceção" (ver `filtrar_apenas_excecoes`). Cliente cadastrado aqui = NÃO conta em
+  VENDAS; cliente ausente = conta por padrão (o oposto do comportamento anterior, e também o oposto da
+  fórmula original da planilha, que exigia "Sim" explícito).
 - **NFES** — lista de Notas Fiscais emitidas (um acumulado de vários meses na planilha do usuário: N° Trans,
   NFE, Série, T.V, Filial, Emissão, CNPJ, RCA, Cód. Cliente, Cliente, UF, IE, Valor Total, OBS — mais duas
   colunas CALCULADAS pela própria planilha, "CALCULA" (VLOOKUP no FILTRO) e "COMPETENCIA", que este módulo
@@ -114,9 +119,12 @@ def _cod_cliente_ou_none(valor):
 # ==============================================================================================
 
 def parse_filtro_clientes(arquivo_ou_planilha) -> pd.DataFrame:
-    """Aceita tanto um arquivo com uma aba "FILTRO" (a planilha inteira do usuário) quanto um arquivo cuja
-    primeira aba já seja o cadastro — procura a aba "FILTRO" pelo nome; se não achar, usa a primeira.
-    Colunas esperadas (com cabeçalho): COD. C | CALCULA | CLIENTE."""
+    """Aceita tanto um arquivo com uma aba "FILTRO" (a planilha inteira do usuário, 3 colunas: COD. C |
+    CALCULA | CLIENTE) quanto uma planilha simples de só exceções, com 2 colunas (Código | Cliente) — desde
+    a mudança de 14/08/2026 (cadastro é só lista de exceções), a coluna "Calcula" passou a ser opcional:
+    com 2 colunas, toda linha vira `calcula=None` (quem chama decide o que fazer — ver
+    `filtrar_apenas_excecoes` e o uso na página, que trata `calcula` todo vazio como "toda linha é
+    exceção"). Procura a aba "FILTRO" pelo nome; se não achar, usa a primeira."""
     # engine="calamine": mesmo motivo do resto do projeto (ver app/lib/importacao.py) — os exports do
     # Winthor têm um XML fora do padrão que quebra o openpyxl (achado em produção em 13/08/2026: TypeError
     # "BookView.__init__() got an unexpected keyword argument 'WindowWidth'" ao importar um arquivo .xlsx
@@ -124,13 +132,19 @@ def parse_filtro_clientes(arquivo_ou_planilha) -> pd.DataFrame:
     xl = pd.ExcelFile(arquivo_ou_planilha, engine="calamine")
     sheet = "FILTRO" if "FILTRO" in xl.sheet_names else xl.sheet_names[0]
     df = xl.parse(sheet)
-    if df.shape[1] < 3:
+    if df.shape[1] < 2:
         raise ValueError(
-            f"A aba \"{sheet}\" tem {df.shape[1]} coluna(s) — esperado pelo menos 3 (Código do Cliente, "
-            f"Calcula, Cliente). Confira se é mesmo a aba \"FILTRO\" do cadastro de clientes."
+            f"A aba \"{sheet}\" tem {df.shape[1]} coluna(s) — esperado pelo menos 2 (Código do Cliente e "
+            f"Cliente, ou Código/Classificação/Cliente no formato antigo). Confira se é mesmo a aba do "
+            f"cadastro de clientes."
         )
-    df = df.iloc[:, :3].copy()
-    df.columns = ["cod_cliente", "calcula", "cliente_nome"]
+    if df.shape[1] == 2:
+        df = df.iloc[:, :2].copy()
+        df.columns = ["cod_cliente", "cliente_nome"]
+        df["calcula"] = None
+    else:
+        df = df.iloc[:, :3].copy()
+        df.columns = ["cod_cliente", "calcula", "cliente_nome"]
     df["cod_cliente"] = df["cod_cliente"].apply(_cod_cliente_ou_none)
     df = df[df["cod_cliente"].notna()].copy()
     df["calcula"] = df["calcula"].apply(_texto_ou_none)
@@ -138,11 +152,30 @@ def parse_filtro_clientes(arquivo_ou_planilha) -> pd.DataFrame:
     return df[["cod_cliente", "calcula", "cliente_nome"]].reset_index(drop=True)
 
 
+def filtrar_apenas_excecoes(df: pd.DataFrame) -> pd.DataFrame:
+    """Recorta um df cru (cod_cliente/calcula/cliente_nome, como devolvido por `parse_filtro_clientes`) só
+    às linhas marcadas "Exceção" na coluna `calcula` — pedido do usuário em 14/08/2026: "quero o cadastro
+    somente do que for exceção, o que não for exceção vai ser calculado" (inverteu o padrão: antes só
+    contava quem estava marcado "Sim"; agora todo mundo conta, e só quem está aqui fica de fora). Aceita
+    "Exceção"/"Excecao"/variação de maiúscula (case/acento-insensível). Linha "Sim", em branco ou com erro
+    de digitação é simplesmente IGNORADA aqui (não vira exceção, mas também não é excluída do cadastro já
+    salvo — reimportar a planilha completa do usuário, que tem ~1700 "Sim" e ~400 "Exceção", não apaga
+    exceções cadastradas manualmente que não vieram nesta leva)."""
+    if df.empty:
+        return df
+    normalizado = (
+        df["calcula"].fillna("").astype(str).str.strip().str.lower()
+        .str.replace("ç", "c", regex=False).str.replace("ã", "a", regex=False)
+    )
+    return df[normalizado == "excecao"].reset_index(drop=True)
+
+
 def salvar_clientes_filtro(session, df: pd.DataFrame, usuario_email: str = None) -> int:
     """Upsert por cod_cliente — nunca apaga cliente que não veio na importação atual (mesmo padrão do
     cadastro_fornecedores_st). Quando o mesmo código aparece mais de uma vez no arquivo (achado em dado
     real: 63 códigos duplicados, alguns com classificação conflitante), fica a PRIMEIRA ocorrência — mesmo
-    comportamento de um VLOOKUP (que para no primeiro match)."""
+    comportamento de um VLOOKUP (que para no primeiro match). Não filtra por "Exceção" sozinha — quem chama
+    esta função decide o que entra (ver `filtrar_apenas_excecoes` para o fluxo normal de import/edição)."""
     if df.empty:
         return 0
     dedup = df.drop_duplicates(subset="cod_cliente", keep="first")
@@ -168,12 +201,12 @@ def carregar_clientes_filtro(session) -> pd.DataFrame:
 
 def salvar_cadastro_clientes_editado(session, df_original: pd.DataFrame, df_editado: pd.DataFrame) -> dict:
     """Grava a grade editável (`st.data_editor` com `num_rows="dynamic"`) da aba "Cadastro de Clientes" —
-    pedido do usuário em 13/08/2026: "não é melhor ter uma aba com os cadastros ... para de lá ir para o
-    cálculo?" (até então o cadastro só dava pra ver/buscar, editar de verdade só reimportando a planilha
-    inteira). `cod_cliente` é a própria chave primária da tabela (não tem `id` separado) — mesma lógica de
-    diff já usada em `lib/lancamentos_manuais.py`/`lib/ncm_tributado.py`, só que chaveada por `cod_cliente`:
-    linha removida na grade (código que sumiu) é excluída do cadastro; o resto (linha nova ou editada) é
-    upsert via `salvar_clientes_filtro`. Devolve {"salvos": n, "removidos": n}."""
+    desde 14/08/2026 essa grade só tem `cod_cliente`/`cliente_nome` (sem coluna de classificação: toda
+    linha aqui É uma exceção, por definição — ver `calcular_adicional10`). `cod_cliente` é a própria chave
+    primária da tabela (não tem `id` separado) — mesma lógica de diff já usada em
+    `lib/lancamentos_manuais.py`/`lib/ncm_tributado.py`, só que chaveada por `cod_cliente`: linha removida
+    na grade (código que sumiu) é excluída do cadastro; o resto (linha nova ou editada) é upsert com
+    `calcula` sempre fixado em "Exceção". Devolve {"salvos": n, "removidos": n}."""
     cods_originais = set(df_original["cod_cliente"].dropna().astype(int)) if not df_original.empty else set()
     cods_editados = (
         set(df_editado["cod_cliente"].dropna().astype(int))
@@ -189,8 +222,12 @@ def salvar_cadastro_clientes_editado(session, df_original: pd.DataFrame, df_edit
 
     validas = df_editado[df_editado["cod_cliente"].notna()].copy() if "cod_cliente" in df_editado.columns \
         else df_editado.iloc[0:0]
-    validas["calcula"] = validas["calcula"].where(validas["calcula"].notna(), None)
-    validas["cliente_nome"] = validas["cliente_nome"].where(validas["cliente_nome"].notna(), None)
+    if not validas.empty:
+        validas["calcula"] = "Exceção"
+        if "cliente_nome" not in validas.columns:
+            validas["cliente_nome"] = None
+        else:
+            validas["cliente_nome"] = validas["cliente_nome"].where(validas["cliente_nome"].notna(), None)
     salvos = salvar_clientes_filtro(session, validas) if not validas.empty else 0
 
     return {"salvos": salvos, "removidos": len(removidos)}
@@ -358,6 +395,112 @@ def salvar_faturamento(session, competencia_id: int, valor) -> None:
     session.commit()
 
 
+# ==============================================================================================
+# Faturamento pelo "CFOP Venda" do ICMS Normal — pedido do usuário em 14/08/2026: "quanto ao faturamento
+# quero que crie um botão do CFOP venda da aba ICMS Normal. Aí pode ser trazido diretamente de lá como
+# também pode ser digitado manualmente". Soma o Valor Total das Saídas da competência de ICMS Normal
+# (mesma Empresa/Ano/Mês) cujo CFOP tem "VENDA" na descrição oficial — critério escolhido pelo usuário entre
+# as opções apresentadas em 14/08/2026 (em vez de, por ex., usar o flag `is_transferencia` já existente).
+# Com margem pra ajuste manual por CFOP (pedido na mesma mensagem: "deixar margem para excluir ou incluir
+# algum CFOP") via `icms_adicional10_cfop_venda_ajuste` — por empresa, override explícito que vale mais que
+# a regra automática da descrição (mesmo padrão de `cfops_sem_validacao`).
+# ==============================================================================================
+
+def listar_cfop_venda_ajustes(session, empresa_id: int) -> pd.DataFrame:
+    rows = session.execute(text("""
+        select a.id, a.cfop, c.descricao, a.incluir, a.motivo, a.criado_por_email, a.created_at
+        from icms_adicional10_cfop_venda_ajuste a
+        left join cfop c on c.codigo = a.cfop
+        where a.empresa_id = :eid
+        order by a.cfop
+    """), {"eid": empresa_id}).mappings().all()
+    return pd.DataFrame(
+        rows, columns=["id", "cfop", "descricao", "incluir", "motivo", "criado_por_email", "created_at"]
+    )
+
+
+def salvar_cfop_venda_ajustes(session, empresa_id: int, df_original: pd.DataFrame, df_editado: pd.DataFrame,
+                               usuario: dict = None) -> dict:
+    """Mesmo padrão de `lib/cfops_sem_validacao.py`: linha nova (sem `id`) insere/atualiza (upsert por
+    empresa+cfop), linha removida na grade exclui o ajuste (volta a valer a regra automática da descrição
+    pra aquele CFOP)."""
+    ids_originais = set(df_original["id"].dropna().astype(int)) if not df_original.empty else set()
+    ids_editados = set(df_editado["id"].dropna().astype(int)) if "id" in df_editado.columns else set()
+
+    removidos = ids_originais - ids_editados
+    for ajuste_id in removidos:
+        session.execute(
+            text("delete from icms_adicional10_cfop_venda_ajuste where id = :id"), {"id": int(ajuste_id)}
+        )
+
+    salvos = 0
+    novas = df_editado[df_editado["id"].isna()] if "id" in df_editado.columns else df_editado
+    usuario = usuario or {}
+    for _, row in novas.iterrows():
+        cfop_raw = row.get("cfop")
+        if pd.isna(cfop_raw):
+            continue
+        session.execute(text("""
+            insert into icms_adicional10_cfop_venda_ajuste
+                (empresa_id, cfop, incluir, motivo, criado_por, criado_por_email)
+            values (:eid, :cfop, :incluir, :motivo, :uid, :email)
+            on conflict (empresa_id, cfop) do update
+                set incluir = excluded.incluir, motivo = excluded.motivo,
+                    criado_por = excluded.criado_por, criado_por_email = excluded.criado_por_email
+        """), {
+            "eid": empresa_id, "cfop": int(cfop_raw), "incluir": bool(row.get("incluir", True)),
+            "motivo": row.get("motivo") or None, "uid": usuario.get("id"), "email": usuario.get("email"),
+        })
+        salvos += 1
+
+    if removidos or salvos:
+        session.commit()
+    return {"salvos": salvos, "removidos": len(removidos)}
+
+
+def calcular_faturamento_cfop_venda(session, empresa_id: int, ano: int, mes: int):
+    """Soma o Valor Total das Saídas da competência de ICMS Normal (mesma empresa/ano/mês) cujo CFOP conta
+    como "venda" — por padrão, descrição oficial contendo "VENDA" (case-insensitive); um CFOP com ajuste
+    manual em `icms_adicional10_cfop_venda_ajuste` usa o ajuste em vez da regra automática. Devolve
+    `(faturamento_ou_None, detalhe_df)` — `None` se não existir competência de ICMS Normal para essa
+    empresa/ano/mês ainda (nada importado lá); `detalhe_df` tem uma linha por CFOP com o valor e se entrou
+    ou não, pra auditoria na tela antes de usar o número."""
+    cid_normal = session.execute(text("""
+        select id from competencias where empresa_id = :eid and ano = :ano and mes = :mes
+            and modulo = 'icms_normal'
+    """), {"eid": empresa_id, "ano": ano, "mes": mes}).scalar()
+    colunas_detalhe = ["cfop", "descricao", "valor_total", "incluido"]
+    if cid_normal is None:
+        return None, pd.DataFrame(columns=colunas_detalhe)
+
+    rows = session.execute(text("""
+        select ni.cfop, c.descricao, sum(ni.valor_total) as valor_total
+        from notas_fiscais_itens ni
+        join cfop c on c.codigo = ni.cfop
+        where ni.competencia_id = :cid and ni.tipo_operacao = 'saida'
+        group by ni.cfop, c.descricao
+        order by ni.cfop
+    """), {"cid": cid_normal}).mappings().all()
+    detalhe = pd.DataFrame(rows, columns=["cfop", "descricao", "valor_total"])
+    if detalhe.empty:
+        detalhe["incluido"] = pd.Series(dtype=bool)
+        return 0.0, detalhe
+
+    ajustes = session.execute(text("""
+        select cfop, incluir from icms_adicional10_cfop_venda_ajuste where empresa_id = :eid
+    """), {"eid": empresa_id}).mappings().all()
+    mapa_ajuste = {a["cfop"]: bool(a["incluir"]) for a in ajustes}
+
+    def _incluido(row):
+        if row["cfop"] in mapa_ajuste:
+            return mapa_ajuste[row["cfop"]]
+        return "venda" in (row["descricao"] or "").lower()
+
+    detalhe["incluido"] = detalhe.apply(_incluido, axis=1)
+    faturamento = float(detalhe.loc[detalhe["incluido"], "valor_total"].fillna(0).sum())
+    return round(faturamento, 2), detalhe
+
+
 def parse_resumo_faturamento(arquivo_ou_planilha) -> dict:
     """Lê a aba "RESUMO" da planilha do usuário (se existir) e devolve um dict {(ano, mes): faturamento} —
     usado só pra PRÉ-PREENCHER o campo de Faturamento na tela quando o usuário importa a planilha inteira
@@ -393,9 +536,17 @@ def parse_resumo_faturamento(arquivo_ou_planilha) -> dict:
 
 def calcular_adicional10(session, competencia_id: int, faturamento) -> dict:
     """Devolve um dict com vendas, base_calculo, adicional_1, adicional_4, total, e o detalhamento (uma
-    linha por NF da competência, com a coluna `conta` indicando se ela entrou ou não em VENDAS)."""
+    linha por NF da competência, com a coluna `conta` indicando se ela entrou ou não em VENDAS).
+
+    Lógica invertida em 14/08/2026 a pedido do usuário: "quero o cadastro somente do que for exceção, o
+    que não for exceção vai ser calculado" — antes, um cliente só contava em VENDAS se estivesse cadastrado
+    como "Sim" (cadastro grande, quase todo mundo precisava ser digitado). Agora o cadastro
+    (`icms_adicional10_clientes`) é uma LISTA DE EXCEÇÕES: todo cliente conta por padrão; só quem está
+    cadastrado ali fica de fora. `.isin()` sempre devolve dtype bool de verdade (mesmo com o cadastro vazio),
+    então esta versão também evita a classe de bug do dtype "object" corrigida em 13/08/2026 (ver histórico
+    do módulo/metodologia no projeto)."""
     nfes = carregar_nfes_itens(session, competencia_id)
-    clientes = carregar_clientes_filtro(session)
+    excecoes_df = carregar_clientes_filtro(session)
 
     if nfes.empty:
         vazio = nfes.assign(conta=pd.Series(dtype=bool))
@@ -404,23 +555,10 @@ def calcular_adicional10(session, competencia_id: int, faturamento) -> dict:
             "total": 0.0, "detalhamento": vazio,
         }
 
-    clientes_dedup = clientes.drop_duplicates(subset="cod_cliente", keep="first").copy()
-    clientes_dedup["calcula_sim"] = (
-        clientes_dedup["calcula"].fillna("").astype(str).str.strip().str.lower().eq("sim")
-    )
-    mapa_calcula = clientes_dedup.set_index("cod_cliente")["calcula_sim"]
+    excecoes = set(excecoes_df["cod_cliente"].dropna().astype(int))
 
     detalhamento = nfes.copy()
-    # .astype(bool) é necessário mesmo depois do fillna(False): quando NENHUM cod_cliente das NFs bate com
-    # o cadastro (ex: cadastro ainda vazio — caso real do import via "Report" bruto do Winthor, que não
-    # traz FILTRO nenhum), o .map() devolve uma coluna inteira de NaN (float64) e o fillna(False) resultante
-    # vira dtype "object" (Python bool solto, não numpy bool) em vez de dtype bool de verdade. Sem o
-    # .astype(bool), o "~detalhamento['conta']" mais adiante (nesta função e na página) faz um NOT bit a bit
-    # em vez de NOT lógico — ~False vira -1 (não True) — e o .loc[...] tenta usar esses -1 como RÓTULO de
-    # linha em vez de máscara booleana, estourando KeyError "None of [...] are in the [index]" (achado em
-    # produção em 13/08/2026, ao calcular uma competência cujas NFs vieram só do export bruto, sem cadastro
-    # de clientes ainda importado).
-    detalhamento["conta"] = detalhamento["cod_cliente"].map(mapa_calcula).fillna(False).astype(bool)
+    detalhamento["conta"] = ~detalhamento["cod_cliente"].isin(excecoes)
 
     vendas = float(detalhamento.loc[detalhamento["conta"], "vl_total"].fillna(0).sum())
     faturamento = float(faturamento) if faturamento is not None else 0.0
