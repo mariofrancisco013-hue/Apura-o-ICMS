@@ -166,6 +166,36 @@ def carregar_clientes_filtro(session) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["cod_cliente", "calcula", "cliente_nome"])
 
 
+def salvar_cadastro_clientes_editado(session, df_original: pd.DataFrame, df_editado: pd.DataFrame) -> dict:
+    """Grava a grade editável (`st.data_editor` com `num_rows="dynamic"`) da aba "Cadastro de Clientes" —
+    pedido do usuário em 13/08/2026: "não é melhor ter uma aba com os cadastros ... para de lá ir para o
+    cálculo?" (até então o cadastro só dava pra ver/buscar, editar de verdade só reimportando a planilha
+    inteira). `cod_cliente` é a própria chave primária da tabela (não tem `id` separado) — mesma lógica de
+    diff já usada em `lib/lancamentos_manuais.py`/`lib/ncm_tributado.py`, só que chaveada por `cod_cliente`:
+    linha removida na grade (código que sumiu) é excluída do cadastro; o resto (linha nova ou editada) é
+    upsert via `salvar_clientes_filtro`. Devolve {"salvos": n, "removidos": n}."""
+    cods_originais = set(df_original["cod_cliente"].dropna().astype(int)) if not df_original.empty else set()
+    cods_editados = (
+        set(df_editado["cod_cliente"].dropna().astype(int))
+        if "cod_cliente" in df_editado.columns and not df_editado.empty else set()
+    )
+    removidos = cods_originais - cods_editados
+    for cod in removidos:
+        session.execute(
+            text("delete from icms_adicional10_clientes where cod_cliente = :cod"), {"cod": int(cod)}
+        )
+    if removidos:
+        session.commit()
+
+    validas = df_editado[df_editado["cod_cliente"].notna()].copy() if "cod_cliente" in df_editado.columns \
+        else df_editado.iloc[0:0]
+    validas["calcula"] = validas["calcula"].where(validas["calcula"].notna(), None)
+    validas["cliente_nome"] = validas["cliente_nome"].where(validas["cliente_nome"].notna(), None)
+    salvos = salvar_clientes_filtro(session, validas) if not validas.empty else 0
+
+    return {"salvos": salvos, "removidos": len(removidos)}
+
+
 def listar_clientes_conflitantes(arquivo_ou_planilha) -> pd.DataFrame:
     """Auditoria do arquivo importado (não do cadastro já salvo): códigos de cliente que aparecem mais de
     uma vez na aba FILTRO com classificações DIFERENTES entre si (ex: "Sim" numa linha, "Exceção" noutra) —
