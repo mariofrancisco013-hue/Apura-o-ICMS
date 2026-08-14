@@ -535,8 +535,9 @@ def parse_resumo_faturamento(arquivo_ou_planilha) -> dict:
 # ==============================================================================================
 
 def calcular_adicional10(session, competencia_id: int, faturamento) -> dict:
-    """Devolve um dict com vendas, base_calculo, adicional_1, adicional_4, total, e o detalhamento (uma
-    linha por NF da competência, com a coluna `conta` indicando se ela entrou ou não em VENDAS).
+    """Devolve um dict com vendas, total_excecao, base_calculo, adicional_1, adicional_4, total, e o
+    detalhamento (uma linha por NF da competência, com a coluna `conta` indicando se ela entrou ou não em
+    VENDAS).
 
     Lógica invertida em 14/08/2026 a pedido do usuário: "quero o cadastro somente do que for exceção, o
     que não for exceção vai ser calculado" — antes, um cliente só contava em VENDAS se estivesse cadastrado
@@ -544,15 +545,19 @@ def calcular_adicional10(session, competencia_id: int, faturamento) -> dict:
     (`icms_adicional10_clientes`) é uma LISTA DE EXCEÇÕES: todo cliente conta por padrão; só quem está
     cadastrado ali fica de fora. `.isin()` sempre devolve dtype bool de verdade (mesmo com o cadastro vazio),
     então esta versão também evita a classe de bug do dtype "object" corrigida em 13/08/2026 (ver histórico
-    do módulo/metodologia no projeto)."""
+    do módulo/metodologia no projeto).
+
+    `total_excecao` (adicionado em 14/08/2026, a pedido do usuário) é a soma do Valor Total das NFs que
+    ficaram DE FORA de VENDAS por causa do cadastro de exceções — útil para conferência na tela de
+    apuração."""
     nfes = carregar_nfes_itens(session, competencia_id)
     excecoes_df = carregar_clientes_filtro(session)
 
     if nfes.empty:
         vazio = nfes.assign(conta=pd.Series(dtype=bool))
         return {
-            "vendas": 0.0, "limite_10pct": 0.0, "base_calculo": 0.0, "adicional_1": 0.0, "adicional_4": 0.0,
-            "total": 0.0, "detalhamento": vazio,
+            "vendas": 0.0, "total_excecao": 0.0, "limite_10pct": 0.0, "base_calculo": 0.0,
+            "adicional_1": 0.0, "adicional_4": 0.0, "total": 0.0, "detalhamento": vazio,
         }
 
     excecoes = set(excecoes_df["cod_cliente"].dropna().astype(int))
@@ -561,6 +566,7 @@ def calcular_adicional10(session, competencia_id: int, faturamento) -> dict:
     detalhamento["conta"] = ~detalhamento["cod_cliente"].isin(excecoes)
 
     vendas = float(detalhamento.loc[detalhamento["conta"], "vl_total"].fillna(0).sum())
+    total_excecao = float(detalhamento.loc[~detalhamento["conta"], "vl_total"].fillna(0).sum())
     faturamento = float(faturamento) if faturamento is not None else 0.0
     limite_10pct = faturamento * PCT_FATURAMENTO_LIMITE / 100
     base_calculo = max(vendas - limite_10pct, 0.0)
@@ -569,6 +575,7 @@ def calcular_adicional10(session, competencia_id: int, faturamento) -> dict:
 
     return {
         "vendas": round(vendas, 2),
+        "total_excecao": round(total_excecao, 2),
         "limite_10pct": round(limite_10pct, 2),
         "base_calculo": round(base_calculo, 2),
         "adicional_1": adicional_1,

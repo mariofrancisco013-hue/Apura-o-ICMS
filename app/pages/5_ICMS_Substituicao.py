@@ -251,17 +251,32 @@ with aba_interestadual:
         # Pedido do usuário em 14/08/2026: "um filtro que permita identificar e apresentar os valores
         # superiores ao sistema winthor" / "os valores do que esta maior na sefaz que o sistema" — filtro
         # adicional (não substitui o de Situação acima, combina com ele) pra isolar só onde a SEFAZ cobra
-        # MAIS do que já está no sistema. Cobre "Divergente" com diferença positiva E "Pendente de entrada"
-        # (não escriturado — diferença sempre positiva ali, já que o sistema não tem nada lançado pra essa
-        # NF: sistema_valor_icms_st fica 0 na conta).
-        so_sefaz_maior = st.checkbox(
-            "🔺 Mostrar só onde a SEFAZ está maior que o sistema (inclui os não escriturados)",
-            key="filtro_sefaz_maior_interestadual",
-            help="Marca só as NFs com diferença positiva (SEFAZ − Sistema > R$ 0,05) — as que realmente "
-                 "precisam de ação (lançar no Winthor ou pagar DAE da diferença).",
+        # MAIS do que já está no sistema. Ajustado no mesmo dia a pedido do usuário ("não pode incluir os
+        # não escriturados"): fica só "Divergente" com diferença positiva — "Pendente de entrada" (não
+        # escriturado) sempre teria diferença positiva ali (sistema_valor_icms_st fica 0 na conta, já que a
+        # NF nem foi lançada no Winthor), mas isso não é "maior que o sistema", é "não está no sistema", e
+        # essas duas situações são tratadas separadamente. Quem quiser ver os não escriturados usa o filtro
+        # de Situação acima ("Pendente de entrada"). Ampliado no mesmo dia ("E os valores em que o sistema
+        # está a maior que a Sefaz?") pra virar um filtro de 3 opções, cobrindo os dois sentidos da
+        # divergência — em ambos, só "Divergente" entra (nunca "Pendente de entrada"/não escriturado).
+        filtro_direcao = st.radio(
+            "Direção da divergência (Divergentes)",
+            options=["Sem filtro adicional", "🔺 SEFAZ maior que o sistema", "🔻 Sistema maior que a SEFAZ"],
+            index=0,
+            key="filtro_direcao_diferenca_interestadual",
+            horizontal=True,
+            help="Filtra as NFs Divergentes pelo sentido da diferença (SEFAZ − Sistema). Nunca inclui as "
+                 "\"Pendente de entrada\" (não escrituradas) — para ver essas, use o filtro de Situação "
+                 "acima.",
         )
-        if so_sefaz_maior:
-            comp_exibir = comp_exibir[comp_exibir["diferenca"] > TOLERANCIA]
+        if filtro_direcao == "🔺 SEFAZ maior que o sistema":
+            comp_exibir = comp_exibir[
+                (comp_exibir["diferenca"] > TOLERANCIA) & (comp_exibir["status"] == "Divergente")
+            ]
+        elif filtro_direcao == "🔻 Sistema maior que a SEFAZ":
+            comp_exibir = comp_exibir[
+                (comp_exibir["diferenca"] < -TOLERANCIA) & (comp_exibir["status"] == "Divergente")
+            ]
 
         # pedido do usuário em 11/08/2026: "a justificativa e observação e excluída coloque para que
         # selecione diretamente aqui" — Justificativa, Observação e Excluída do cálculo agora se editam

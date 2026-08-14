@@ -322,12 +322,18 @@ with aba_calculo:
         st.markdown("---")
         resultado = calcular_adicional10(session, cid, faturamento_atual)
 
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("VENDAS (não-exceção)", formatar_moeda(resultado["vendas"]))
-        m2.metric(f"{PCT_FATURAMENTO_LIMITE:.0f}% Faturamento", formatar_moeda(resultado["limite_10pct"]))
-        m3.metric("Base de Cálculo", formatar_moeda(resultado["base_calculo"]))
-        m4.metric(f"Adicional {ALIQ_ADICIONAL_1:.0f}%", formatar_moeda(resultado["adicional_1"]))
-        m5.metric(f"Adicional {ALIQ_ADICIONAL_4:.0f}%", formatar_moeda(resultado["adicional_4"]))
+        # Layout em 2 linhas de 3 colunas (em vez de 1 linha de 5) — com 5 colunas os valores em R$ maiores
+        # ficavam cortados no st.metric. Pedido do usuário em 14/08/2026: trazer também o Total da Exceção
+        # e deixar claro que a primeira métrica é a venda para não contribuinte.
+        r1c1, r1c2, r1c3 = st.columns(3)
+        r1c1.metric("Venda p/ Não Contribuinte", formatar_moeda(resultado["vendas"]))
+        r1c2.metric("Total Exceção", formatar_moeda(resultado["total_excecao"]))
+        r1c3.metric("Base de Cálculo", formatar_moeda(resultado["base_calculo"]))
+
+        r2c1, r2c2, r2c3 = st.columns(3)
+        r2c1.metric(f"{PCT_FATURAMENTO_LIMITE:.0f}% Faturamento", formatar_moeda(resultado["limite_10pct"]))
+        r2c2.metric(f"Adicional {ALIQ_ADICIONAL_1:.0f}%", formatar_moeda(resultado["adicional_1"]))
+        r2c3.metric(f"Adicional {ALIQ_ADICIONAL_4:.0f}%", formatar_moeda(resultado["adicional_4"]))
 
         st.metric("💰 Total Adicional 10%", formatar_moeda(resultado["total"]))
 
@@ -335,6 +341,11 @@ with aba_calculo:
             st.warning(
                 "Faturamento ainda não foi salvo para esta competência — Base de Cálculo está usando "
                 "R$ 0,00."
+            )
+        elif resultado["base_calculo"] == 0:
+            st.info(
+                "Não atingiu os 10% — a Venda para Não Contribuinte não superou o limite de "
+                f"{PCT_FATURAMENTO_LIMITE:.0f}% do Faturamento, então a Base de Cálculo é R$ 0,00."
             )
 
         detalhamento = resultado["detalhamento"]
