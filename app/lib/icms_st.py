@@ -205,10 +205,38 @@ def _moeda_br_para_float(valor) -> float:
         return 0.0
 
 
+def _descartar_linhas_sem_nf(df: pd.DataFrame, contexto: str) -> pd.DataFrame:
+    """Descarta linha(s) de rodapé/em branco no fim do export (nf_numero vazio) antes de montar o
+    DataFrame final. Se uma linha tiver nf_numero vazio MAS algum outro campo preenchido, trava a
+    importação com erro em vez de descartar ou gravar — mesmo princípio já usado em
+    app/lib/importacao.py para linhas de rodapé do Entrada/Saída (ver comentário lá).
+
+    Necessário desde que o Streamlit Cloud atualizou pra pandas 3: `Series.astype(str)` DEIXOU de
+    converter NaN pra string "nan" e passou a PRESERVAR o NaN como está (mudança de comportamento do
+    pandas 3, confirmado testando) — uma linha em branco no fim do arquivo, que antes virava a string
+    inofensiva "nan", agora chega como um NULL de verdade e quebra a constraint `not null` de nf_numero no
+    banco (erro relatado pelo usuário em 17/08/2026 ao importar a Rotina 1076 Sintético — layout resumido
+    por NF)."""
+    nf_bruto = df["nf_numero"]
+    nf_vazio = nf_bruto.isna() | (nf_bruto.astype(str).str.strip().isin(["", "nan", "None"]))
+    if not nf_vazio.any():
+        return df
+    tem_outro_dado = df.drop(columns=["nf_numero"]).notna().any(axis=1)
+    suspeitas = nf_vazio & tem_outro_dado
+    if suspeitas.any():
+        exemplos = df.loc[suspeitas].head(3).to_dict("records")
+        raise ValueError(
+            f"{int(suspeitas.sum())} linha(s) do arquivo ({contexto}) têm NF vazia mas outros campos "
+            f"preenchidos — confira o arquivo antes de importar. Exemplos: {exemplos}"
+        )
+    return df.loc[~nf_vazio].reset_index(drop=True)
+
+
 def _parse_1076_item(df: pd.DataFrame) -> pd.DataFrame:
     """Layout item a item (18 colunas) — uma linha por item de entrada, a mesma NF aparece várias vezes."""
     df = df.copy()
     df.columns = COLS_1076_ITEM_RAW
+    df = _descartar_linhas_sem_nf(df, "Rotina 1076 item a item")
 
     df["num_seq_ent"] = df["num_seq_ent"].apply(_limpar_celula_corrompida)
     df["aliq_cheia"] = df["aliq_cheia"].apply(_limpar_celula_corrompida)
@@ -241,6 +269,7 @@ def _parse_1076_resumido(df: pd.DataFrame) -> pd.DataFrame:
     """Layout resumido por NF (17 colunas) — uma linha por Nota Fiscal, sem detalhe de item/produto/NCM."""
     df = df.copy()
     df.columns = COLS_1076_RESUMIDO_RAW
+    df = _descartar_linhas_sem_nf(df, "Rotina 1076 resumido por NF")
 
     fornecedor_split = df["fornecedor"].apply(_dividir_codigo_nome)
 
@@ -273,6 +302,7 @@ def _parse_1076_analitico(df: pd.DataFrame) -> pd.DataFrame:
     código+nome+CNPJ juntos na mesma linha (igual o resumido por NF). Usado só na aba Crédito Presumido."""
     df = df.copy()
     df.columns = COLS_1076_ANALITICO_RAW
+    df = _descartar_linhas_sem_nf(df, "Rotina 1076 Analítico")
 
     fornecedor_split = df["fornecedor"].apply(_dividir_codigo_nome)
     produto_split = df["produto"].apply(_dividir_codigo_nome)
@@ -324,6 +354,7 @@ def _parse_1096(df: pd.DataFrame) -> pd.DataFrame:
     substituir a tentativa anterior de usar a Rotina 1076 nesta aba."""
     df = df.copy()
     df.columns = COLS_1096_RAW
+    df = _descartar_linhas_sem_nf(df, "Relatório 1096")
 
     produto_split = df["produto"].apply(_dividir_codigo_nome)
 
@@ -397,6 +428,7 @@ def parse_sefaz_lancamentos(arquivo) -> pd.DataFrame:
             f"{df.columns.tolist()}"
         )
     df = df.rename(columns=COLS_SEFAZ_MAP)
+    df = _descartar_linhas_sem_nf(df, "Lançamentos da SEFAZ")
 
     out = pd.DataFrame({"nf_numero": df["nf_numero"].astype(str).str.strip()})
     out["cte"] = df["cte"]
