@@ -43,7 +43,9 @@ valor é confiável nos dois layouts.
 import re
 
 import pandas as pd
+import pandas.errors
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 TOLERANCIA = 0.05  # mesma tolerância usada na Conferência Detalhada (app/lib/conferencia_detalhada_1024.py)
 
@@ -422,6 +424,27 @@ def parse_sefaz_lancamentos(arquivo) -> pd.DataFrame:
     return out[COLS_SEFAZ_TABELA]
 
 
+def _gravar_dataframe(out: pd.DataFrame, tabela: str, session) -> None:
+    """to_sql com mensagem de erro legível — pedido do usuário em 14/08/2026 (erro real ao importar a
+    Rotina 1076): o Streamlit Cloud REDIGE a mensagem de qualquer exceção que escape até o topo sem ser
+    tratada (proteção contra vazar a connection string do banco nos logs), então um erro de banco de
+    verdade (overflow de campo numeric, tipo de dado incompatível, etc.) aparecia só como
+    "pandas.errors.DatabaseError: ... redacted ...", sem dizer qual era o problema. Capturando aqui e
+    relançando como ValueError (que todo botão de importação desta aba já trata com `except ValueError as
+    e: st.error(str(e))`), a mensagem real do Postgres chega até a tela em vez de ser escondida.
+
+    Pega tanto `SQLAlchemyError` quanto `pandas.errors.DatabaseError` — o `to_sql` do pandas RE-EMBRULHA a
+    exceção original do SQLAlchemy/driver numa `pandas.errors.DatabaseError` própria (que não herda de
+    `SQLAlchemyError`, e sim de `OSError`), confirmado testando contra o erro real do usuário."""
+    try:
+        out.to_sql(tabela, session.bind, if_exists="append", index=False, method="multi", chunksize=500)
+    except (SQLAlchemyError, pandas.errors.DatabaseError) as e:
+        causa = e.__cause__ or e
+        raise ValueError(
+            f"Erro ao gravar em '{tabela}': {getattr(causa, 'orig', None) or causa}"
+        ) from e
+
+
 def salvar_rotina_1076(session, competencia_id: int, df: pd.DataFrame) -> int:
     """Substitui os itens desta competência pelos recém-importados (apagar+inserir — evita duplicar se o
     analista reimportar o mesmo arquivo, mesmo padrão usado em todo o resto do projeto)."""
@@ -429,7 +452,7 @@ def salvar_rotina_1076(session, competencia_id: int, df: pd.DataFrame) -> int:
     if not df.empty:
         out = df.copy()
         out.insert(0, "competencia_id", competencia_id)
-        out.to_sql("rotina_1076_itens", session.bind, if_exists="append", index=False, method="multi", chunksize=500)
+        _gravar_dataframe(out, "rotina_1076_itens", session)
     session.commit()
     return len(df)
 
@@ -440,7 +463,7 @@ def salvar_sefaz_lancamentos(session, competencia_id: int, df: pd.DataFrame) -> 
     if not df.empty:
         out = df.copy()
         out.insert(0, "competencia_id", competencia_id)
-        out.to_sql("sefaz_st_lancamentos", session.bind, if_exists="append", index=False, method="multi", chunksize=500)
+        _gravar_dataframe(out, "sefaz_st_lancamentos", session)
     session.commit()
     return len(df)
 
@@ -464,10 +487,7 @@ def salvar_relatorio_1096(session, competencia_id: int, df: pd.DataFrame) -> int
     if not df.empty:
         out = df.copy()
         out.insert(0, "competencia_id", competencia_id)
-        out.to_sql(
-            "relatorio_1096_itens", session.bind, if_exists="append", index=False, method="multi",
-            chunksize=500,
-        )
+        _gravar_dataframe(out, "relatorio_1096_itens", session)
     session.commit()
     return len(df)
 
@@ -532,10 +552,7 @@ def salvar_credito_presumido_1076(session, competencia_id: int, df: pd.DataFrame
     if not df.empty:
         out = df.copy()
         out.insert(0, "competencia_id", competencia_id)
-        out.to_sql(
-            "credito_presumido_1076_itens", session.bind, if_exists="append", index=False, method="multi",
-            chunksize=500,
-        )
+        _gravar_dataframe(out, "credito_presumido_1076_itens", session)
     session.commit()
     return len(df)
 

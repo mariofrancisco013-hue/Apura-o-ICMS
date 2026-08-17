@@ -23,7 +23,7 @@ from lib.calculo_icms_pe import (
 from lib.calculo_icms_normal import salvar_apuracao
 from lib.importar_1025 import parse_rotina_1025
 from lib.planilha import salvar_checkpoint_1025_bulk
-from lib.formatacao import formatar_moeda, coluna_moeda, rotulo_empresa
+from lib.formatacao import formatar_moeda, formatar_percentual, coluna_moeda, rotulo_empresa
 from sqlalchemy import text
 
 st.set_page_config(page_title="ICMS PE", layout="wide")
@@ -362,9 +362,15 @@ with aba_apuracao:
             r = linhas_db.get(cod)
             return r["valor"] if r else 0
 
+        # linha 4.1 (Alíquota Média) é uma razão, não um valor em R$ — pedido do usuário em 14/08/2026: "a
+        # alíquota está 21% na minha conferência é para ser 21,16%" — formatar_moeda arredondava pra 2
+        # casas decimais como se fosse dinheiro (0,2116 -> "R$ 0,21"), escondendo o "16" do percentual.
         def _tabela(pares):
             return pd.DataFrame([
-                {"Linha": cod, "Descrição": desc, "Valor": formatar_moeda(_linha(cod))}
+                {
+                    "Linha": cod, "Descrição": desc,
+                    "Valor": formatar_percentual(_linha(cod)) if cod == "4.1" else formatar_moeda(_linha(cod)),
+                }
                 for cod, desc in pares
             ]).set_index("Linha")
 

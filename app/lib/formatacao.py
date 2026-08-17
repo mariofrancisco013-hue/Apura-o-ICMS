@@ -29,6 +29,21 @@ def formatar_moeda(valor) -> str:
     return f"{sinal}R$ {texto_br}"
 
 
+def formatar_percentual(valor, casas: int = 2) -> str:
+    """Formata uma razão (ex: 0.2116) como percentual brasileiro: "21,16%". Pedido do usuário em 14/08/2026
+    — a linha 4.1 (Alíquota Média) da Apuração PE é uma razão (4.1.02/4.1.01), não um valor monetário, mas
+    estava passando por `formatar_moeda`, que arredonda pra 2 casas decimais como se fosse R$: 0,2116 virava
+    "R$ 0,21", escondendo os dois dígitos decimais do percentual (21,16% aparecia como 21%). Aceita
+    None/valores inválidos sem quebrar a tela (mostra 0,00%)."""
+    try:
+        v = float(valor) * 100
+    except (TypeError, ValueError):
+        v = 0.0
+    texto_us = f"{v:,.{casas}f}"
+    texto_br = texto_us.replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"{texto_br}%"
+
+
 def coluna_moeda(label: str, **kwargs):
     """Atalho para uma coluna numérica de grade editável (st.data_editor) exibida com prefixo R$."""
     import streamlit as st
