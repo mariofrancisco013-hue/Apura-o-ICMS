@@ -129,15 +129,28 @@ COLS_1076_ANALITICO_RAW = [
 ]
 
 # Colunas do CSV de lançamentos da SEFAZ (cabeçalho real, separador ";", campos entre aspas) -> nome interno.
+# Atualizado em 29/09/2026: a SEFAZ mudou o layout do export "lançamentos" — usuário relatou "o leiaute da
+# sefaz mudou" e mandou um arquivo novo sem 8 das colunas antigas (Data de Inclusão, DAE, Retenção, GNRE,
+# Ressarcimento, Crédito Presumido, Parcelado, Auto Infração). Como nenhuma delas é usada no cálculo
+# principal (comparar_1076_sefaz só usa nf_numero/receita/calculado), elas viram OPCIONAIS: essenciais
+# (sempre exigidas) vs opcionais (usadas se existirem no arquivo, senão gravadas como 0,0/vazio) — assim o
+# import não trava de novo numa próxima mudança de leiaute que também só mexa numa coluna secundária.
+COLS_SEFAZ_ESSENCIAIS = [
+    "CT-e", "Emitente", "Nota Fiscal", "Data do Fato Gerador", "Valor Total", "Destinatário",
+    "Credenciamento", "Data de Vencimento", "Receita", "Calculado", "Pago", "N° DAE", "Situação",
+]
+COLS_SEFAZ_OPCIONAIS_MAP = {
+    "Data de Inclusão": "data_inclusao", "DAE": "dae", "Retenção": "retencao", "GNRE": "gnre",
+    "Ressarcimento": "ressarcimento", "Crédito Presumido": "credito_presumido",
+    "Parcelado": "parcelado", "Auto Infração": "auto_infracao",
+}
 COLS_SEFAZ_MAP = {
     "CT-e": "cte", "Emitente": "emitente", "Nota Fiscal": "nf_numero",
-    "Data de Inclusão": "data_inclusao", "Data do Fato Gerador": "data_fato_gerador",
-    "Valor Total": "valor_total_nota", "Destinatário": "destinatario",
-    "Credenciamento": "credenciamento", "Data de Vencimento": "data_vencimento",
-    "Receita": "receita", "Calculado": "calculado", "Pago": "pago", "DAE": "dae",
-    "Retenção": "retencao", "GNRE": "gnre", "Ressarcimento": "ressarcimento",
-    "Crédito Presumido": "credito_presumido", "Parcelado": "parcelado",
-    "Auto Infração": "auto_infracao", "N° DAE": "n_dae", "Situação": "situacao",
+    "Data do Fato Gerador": "data_fato_gerador", "Valor Total": "valor_total_nota",
+    "Destinatário": "destinatario", "Credenciamento": "credenciamento",
+    "Data de Vencimento": "data_vencimento", "Receita": "receita", "Calculado": "calculado",
+    "Pago": "pago", "N° DAE": "n_dae", "Situação": "situacao",
+    **COLS_SEFAZ_OPCIONAIS_MAP,
 }
 COLS_SEFAZ_TABELA = [
     "cte", "emitente", "nf_numero", "data_inclusao", "data_fato_gerador", "valor_total_nota",
@@ -420,7 +433,7 @@ def parse_sefaz_lancamentos(arquivo) -> pd.DataFrame:
     tabela sefaz_st_lancamentos — TODAS as receitas são gravadas (para referência/auditoria); o filtro pela
     Receita 1031 (ICMS ST Interestadual) acontece em comparar_1076_sefaz, não aqui."""
     df = pd.read_csv(arquivo, sep=";", encoding="utf-8-sig", dtype=str, quotechar='"')
-    faltando = [c for c in COLS_SEFAZ_MAP if c not in df.columns]
+    faltando = [c for c in COLS_SEFAZ_ESSENCIAIS if c not in df.columns]
     if faltando:
         raise ValueError(
             f"Colunas esperadas não encontradas no CSV da SEFAZ: {faltando}. Confira se é o export de "
@@ -430,10 +443,18 @@ def parse_sefaz_lancamentos(arquivo) -> pd.DataFrame:
     df = df.rename(columns=COLS_SEFAZ_MAP)
     df = _descartar_linhas_sem_nf(df, "Lançamentos da SEFAZ")
 
+    # colunas opcionais (ver COLS_SEFAZ_OPCIONAIS_MAP) — só existem no df se a coluna original estava no
+    # arquivo; quando faltar, usa uma Series vazia (tudo NaN) do mesmo tamanho, que os métodos abaixo
+    # (_moeda_br_para_float/to_datetime) já tratam como 0.0/data nula, sem precisar de um "if" por campo.
+    def _col_opcional(nome_interno):
+        return df[nome_interno] if nome_interno in df.columns else pd.Series(pd.NA, index=df.index)
+
     out = pd.DataFrame({"nf_numero": df["nf_numero"].astype(str).str.strip()})
     out["cte"] = df["cte"]
     out["emitente"] = df["emitente"]
-    out["data_inclusao"] = pd.to_datetime(df["data_inclusao"], format="%d/%m/%Y", errors="coerce").dt.date
+    out["data_inclusao"] = pd.to_datetime(
+        _col_opcional("data_inclusao"), format="%d/%m/%Y", errors="coerce"
+    ).dt.date
     out["data_fato_gerador"] = pd.to_datetime(
         df["data_fato_gerador"], format="%d/%m/%Y", errors="coerce"
     ).dt.date
@@ -444,13 +465,13 @@ def parse_sefaz_lancamentos(arquivo) -> pd.DataFrame:
     out["receita"] = df["receita"].astype(str).str.strip()
     out["calculado"] = df["calculado"].apply(_moeda_br_para_float)
     out["pago"] = df["pago"].apply(_moeda_br_para_float)
-    out["dae"] = df["dae"].apply(_moeda_br_para_float)
-    out["retencao"] = df["retencao"].apply(_moeda_br_para_float)
-    out["gnre"] = df["gnre"].apply(_moeda_br_para_float)
-    out["ressarcimento"] = df["ressarcimento"].apply(_moeda_br_para_float)
-    out["credito_presumido"] = df["credito_presumido"].apply(_moeda_br_para_float)
-    out["parcelado"] = df["parcelado"].apply(_moeda_br_para_float)
-    out["auto_infracao"] = df["auto_infracao"].apply(_moeda_br_para_float)
+    out["dae"] = _col_opcional("dae").apply(_moeda_br_para_float)
+    out["retencao"] = _col_opcional("retencao").apply(_moeda_br_para_float)
+    out["gnre"] = _col_opcional("gnre").apply(_moeda_br_para_float)
+    out["ressarcimento"] = _col_opcional("ressarcimento").apply(_moeda_br_para_float)
+    out["credito_presumido"] = _col_opcional("credito_presumido").apply(_moeda_br_para_float)
+    out["parcelado"] = _col_opcional("parcelado").apply(_moeda_br_para_float)
+    out["auto_infracao"] = _col_opcional("auto_infracao").apply(_moeda_br_para_float)
     out["n_dae"] = df["n_dae"]
     out["situacao"] = df["situacao"]
     return out[COLS_SEFAZ_TABELA]

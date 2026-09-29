@@ -25,8 +25,26 @@ comando já vira sua própria transação, que fecha sozinha assim que termina, 
 conexão ficar "idle in transaction" nem por engano. Não muda nada no comportamento do app: todo ponto do
 código que grava dado já chamava `session.commit()` explicitamente antes disso (e não há nenhum
 `session.rollback()` no projeto que dependesse do modo anterior).
+
+CORREÇÃO "ModuleNotFoundError: psycopg" (29/09/2026): o app parou de subir em produção — `Home.py` quebrava
+bem aqui, em `create_engine()`, tentando `import psycopg` (a versão 3 do driver, pacote diferente do
+`psycopg2-binary` que está no requirements.txt). Causa raiz confirmada testando: a partir do SQLAlchemy
+2.1, uma `DATABASE_URL` sem driver explícito (`postgresql://...`, o formato que o painel do Supabase
+sugere) passou a resolver para o dialeto `psycopg` (v3) por padrão, em vez de `psycopg2` como antes —
+mudança de comportamento do SQLAlchemy, não um erro de configuração do usuário. Reproduzido isolado: com
+`sqlalchemy>=2.1` e só `psycopg2-binary` instalado, `create_engine("postgresql://...")` já falha com esse
+`ModuleNotFoundError`; `create_engine("postgresql+psycopg2://...")` funciona normalmente. Como
+`requirements.txt` não trava a versão do SQLAlchemy (`sqlalchemy>=2.0`, sem teto), isso pode voltar a
+acontecer sozinho numa reimplantação futura que puxe uma versão mais nova ainda. Corrigido aqui, não só na
+`DATABASE_URL` salva nos Secrets: `get_database_url()` agora força o driver `psycopg2` explicitamente
+sempre que a URL não especificar nenhum (`postgresql://` vira `postgresql+psycopg2://` antes de chegar no
+`create_engine`) — assim a connection string colada direto do painel do Supabase (que nunca inclui
+`+psycopg2`) sempre funciona, hoje e em atualizações futuras do SQLAlchemy, sem depender de ninguém lembrar
+de editar a URL à mão.
 """
 import os
+import re
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -52,6 +70,11 @@ def get_database_url() -> str:
             "responde por IPv6 e a maioria das hospedagens (incluindo Streamlit Community Cloud) não "
             "tem saída IPv6."
         )
+    # Força o driver psycopg2 quando a URL não especifica nenhum — ver docstring "CORREÇÃO
+    # ModuleNotFoundError: psycopg" acima. `postgresql://...` e `postgres://...` (Supabase às vezes usa o
+    # esquema curto) viram `postgresql+psycopg2://...`; uma URL que já especifica outro driver
+    # (`+psycopg`, `+asyncpg` etc.) não é mexida.
+    url = re.sub(r"^postgres(ql)?://", "postgresql+psycopg2://", url)
     return url
 
 
