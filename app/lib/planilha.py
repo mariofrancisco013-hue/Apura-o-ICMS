@@ -422,15 +422,34 @@ def carregar_checkpoint_1024_editavel(session, competencia_id, tipo_operacao):
     return df[df["cfop"].apply(lambda c: (c // 1000) in faixa)].reset_index(drop=True)
 
 
-def salvar_checkpoint_1024_bulk(session, competencia_id, df):
-    """`df` é a grade editada (colunas cfop, base_1024, icms_1024) — grava só as linhas preenchidas."""
+def salvar_checkpoint_1024_bulk(session, competencia_id, df, substituir_tudo=False):
+    """`df` é a grade editada (colunas cfop, base_1024, icms_1024) — grava só as linhas preenchidas.
+
+    `substituir_tudo` (pedido do usuário em 30/09/2026: "na rotina 1024 da empresa santos dumont não tem
+    os cfop 2102 - 2353 - 2403 - 2923 e ao importar o relatorio esta me mostrando estes cfos") — por
+    padrão (False, usado pelo botão "Salvar valores da Rotina 1024" da edição manual da grade) esta função
+    só faz upsert CFOP por CFOP dos que vierem preenchidos no `df`, e NUNCA apaga um CFOP que já estava
+    salvo de uma importação anterior mas não aparece mais agora. Isso é o comportamento certo pra edição
+    manual incremental, mas é o bug real neste caso: o botão "📥 Importar do PDF" (ver 2_ICMS_Normal.py)
+    também usava esse mesmo caminho, então reimportar um PDF novo (que não tem mais aqueles CFOPs) nunca
+    limpava os CFOPs órfãos de uma importação anterior (de outro mês/arquivo) — eles ficavam pra sempre
+    misturados com os dados corretos do PDF novo. `substituir_tudo=True` (usado só pelo botão de importar
+    PDF) apaga TODOS os checkpoints 'rotina_1024' desta competência antes de inserir os novos — a leitura
+    do PDF passa a ser sempre um espelho exato do último arquivo importado, igual ao padrão já usado em
+    outras importações do projeto (apagar+inserir por competência)."""
+    if substituir_tudo:
+        session.execute(
+            text("delete from checkpoints_referencia where competencia_id=:cid and fonte='rotina_1024'"),
+            {"cid": competencia_id},
+        )
     salvos = 0
     for _, row in df.iterrows():
         if pd.isna(row.get("base_1024")) and pd.isna(row.get("icms_1024")):
             continue
-        session.execute(text("delete from checkpoints_referencia "
-                              "where competencia_id=:cid and fonte='rotina_1024' and cfop=:cfop"),
-                         {"cid": competencia_id, "cfop": int(row["cfop"])})
+        if not substituir_tudo:
+            session.execute(text("delete from checkpoints_referencia "
+                                  "where competencia_id=:cid and fonte='rotina_1024' and cfop=:cfop"),
+                             {"cid": competencia_id, "cfop": int(row["cfop"])})
         session.execute(text("""
             insert into checkpoints_referencia (competencia_id, fonte, cfop, valor_base, valor_icms)
             values (:cid, 'rotina_1024', :cfop, :base, :icms)

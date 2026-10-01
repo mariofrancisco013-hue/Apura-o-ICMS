@@ -332,7 +332,11 @@ def _aba_planilha(tipo_operacao, titulo):
                 df_1024 = pd.DataFrame(linhas_1024).rename(
                     columns={"valor_base": "base_1024", "valor_icms": "icms_1024"}
                 )
-                n = salvar_checkpoint_1024_bulk(session, cid, df_1024)
+                # substituir_tudo=True: reimportar o PDF é sempre um espelho exato do arquivo (apaga CFOPs
+                # órfãos de uma importação anterior que não existem mais neste PDF novo) — ver docstring de
+                # salvar_checkpoint_1024_bulk (bug relatado pelo usuário em 30/09/2026, CFOPs 2102/2353/
+                # 2403/2923 aparecendo mesmo não existindo no PDF da Santos Dumont).
+                n = salvar_checkpoint_1024_bulk(session, cid, df_1024, substituir_tudo=True)
                 st.success(f"{n} CFOP(s) importado(s) do PDF da Rotina 1024 (Entrada + Saída juntas).")
                 st.rerun()
             except ValueError as e:
