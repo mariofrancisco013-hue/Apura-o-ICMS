@@ -1,4 +1,4 @@
-# Apuração ICMS 
+# Apuração ICMS — Sodine Atacado F3
 
 Plataforma de apuração de ICMS, reconstruída em 05/08/2026 (Supabase + Streamlit + GitHub). Substitui o
 fluxo anterior em planilha. Módulo em desenvolvimento: **ICMS Normal**. Módulos futuros: ICMS Substituição

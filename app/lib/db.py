@@ -41,7 +41,23 @@ sempre que a URL não especificar nenhum (`postgresql://` vira `postgresql+psyco
 `create_engine`) — assim a connection string colada direto do painel do Supabase (que nunca inclui
 `+psycopg2`) sempre funciona, hoje e em atualizações futuras do SQLAlchemy, sem depender de ninguém lembrar
 de editar a URL à mão.
-"""
+
+CORREÇÃO "TimeoutError: QueuePool limit ... reached" (02/10/2026): o app começou a travar em produção com
+`sqlalchemy.exc.TimeoutError` logo na primeira consulta de cada página — sinal de que o pool esgotou (todas
+as 10 conexões, pool_size=5 + max_overflow=5, em uso ao mesmo tempo). Causa raiz: `get_session()` criava
+uma `Session()` NOVA — e portanto fazia o checkout de uma conexão NOVA do pool — a cada rerun do Streamlit
+(ou seja, a cada clique/interação, já que o Streamlit reroda a página inteira do zero toda vez), mas nunca
+devolvia a conexão da rodada ANTERIOR ao pool. Isso já era um risco conhecido (ver nota "IDLE IN
+TRANSACTION" acima, que resolveu a conexão ficar presa numa transação, mas não resolveu a conexão ficar
+presa NO POOL) — na prática, bastam algumas interações seguidas (editar uma grade, trocar de aba, importar
+um arquivo) pra acumular mais conexões "esquecidas" (esperando o GC cíclico do Python rodar pra liberar)
+do que o pool suporta, e a próxima tentativa de pegar uma conexão trava até estourar o timeout.
+
+Corrigido aqui: `get_session()` agora guarda a Session no `st.session_state` (um por aba/sessão de
+navegador, não um por rerun) e FECHA explicitamente a Session da rodada anterior antes de criar uma nova —
+`session.close()` devolve a conexão ao pool na hora, sem depender do GC. Como há só uma Session "viva" por
+aba de navegador a qualquer momento (em vez de uma por rerun), o uso real de conexões fica preso ao número
+de abas abertas (2-5 usuários, bem abaixo do limite de 10), não ao número de cliques."""
 import os
 import re
 
@@ -108,4 +124,25 @@ def get_session():
     global _SessionLocal
     if _SessionLocal is None:
         _SessionLocal = sessionmaker(bind=get_engine())
-    return _SessionLocal()
+
+    try:
+        import streamlit as st
+    except Exception:
+        # fora do Streamlit (scripts de linha de comando): uma Session por chamada é seguro — o processo
+        # roda uma vez e termina, não acumula rerun nenhum.
+        return _SessionLocal()
+
+    # Fecha a Session da rodada ANTERIOR desta mesma aba/sessão de navegador antes de criar uma nova —
+    # devolve a conexão ao pool imediatamente (ver docstring "TimeoutError: QueuePool limit" acima), em vez
+    # de deixar pro GC cíclico do Python decidir quando. st.session_state é por aba de navegador, então
+    # isso nunca fecha a Session de OUTRO usuário/aba.
+    sessao_anterior = st.session_state.get("_db_session")
+    if sessao_anterior is not None:
+        try:
+            sessao_anterior.close()
+        except Exception:
+            pass  # conexão já pode ter caído sozinha (idle timeout do pooler) — tudo bem, só seguir
+
+    nova_sessao = _SessionLocal()
+    st.session_state["_db_session"] = nova_sessao
+    return nova_sessao
